@@ -263,7 +263,15 @@ function escapeAttr(s) { return escapeHtml(s); }
 function attachEvents() {
   document.getElementById('btn-add').onclick = () => openModal('add');
   document.getElementById('btn-logout').onclick = () => signOut(auth);
-  document.getElementById('input-busca').oninput = (e) => { state.busca = e.target.value; state.page = 1; render(); };
+  document.getElementById('input-busca').oninput = (e) => {
+    state.busca = e.target.value;
+    state.page = 1;
+    const cursorPos = e.target.selectionStart;
+    render();
+    const input = document.getElementById('input-busca');
+    input.focus();
+    input.setSelectionRange(cursorPos, cursorPos);
+  };
   document.getElementById('select-depto').onchange = (e) => { state.departamento = e.target.value; state.page = 1; render(); };
   document.getElementById('select-status').onchange = (e) => { state.status = e.target.value; state.page = 1; render(); };
   const clearBtn = document.getElementById('btn-clear');
