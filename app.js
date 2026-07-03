@@ -24,6 +24,8 @@ const ICONS = {
   userx: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#C4432E" stroke-width="2"><path d="M16 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="8.5" cy="7" r="4"/><path d="M18 8l4 4M22 8l-4 4"/></svg>',
   usercheck: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#2F9E62" stroke-width="2"><path d="M16 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="8.5" cy="7" r="4"/><path d="M17 11l2 2 4-4"/></svg>',
   trash: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#8A9793" stroke-width="2"><path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6h14z"/></svg>',
+  pause: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#A6631B" stroke-width="2"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>',
+  rotate: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#2F9E62" stroke-width="2"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/></svg>',
   x: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#16211F" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>',
   alert: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#C4432E" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><path d="M12 9v4M12 17h.01"/></svg>',
   upload: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>',
@@ -37,7 +39,8 @@ const STATUS_META = {
   em_dia:    { label: 'Em dia',                   color: 'var(--c-emdia)',     bg: 'var(--c-emdia-bg)' },
   agendado:  { label: 'Agendado',                 color: 'var(--c-agendado)',  bg: 'var(--c-agendado-bg)' },
   sem_exame: { label: 'Sem exame',                color: 'var(--c-semexame)',  bg: 'var(--c-semexame-bg)' },
-  inativo:   { label: 'Inativo',                  color: 'var(--c-inativo)',   bg: 'var(--c-inativo-bg)' },
+  afastado:  { label: 'Afastado',                 color: 'var(--c-afastado)',  bg: 'var(--c-afastado-bg)' },
+  inativo:   { label: 'Desligado',                color: 'var(--c-inativo)',   bg: 'var(--c-inativo-bg)' },
 };
 
 let state = { employees: [], busca: '', departamento: 'Todos', status: 'Todos', page: 1, isManager: false, managerSetor: null };
@@ -162,7 +165,7 @@ async function bulkDismiss(ids) {
   const CHUNK = 400;
   for (let i = 0; i < ids.length; i += CHUNK) {
     const batch = writeBatch(db);
-    ids.slice(i, i + CHUNK).forEach(id => batch.set(doc(db, EMPLOYEES_COL, id), { ativo: false, dataAgendada: '' }, { merge: true }));
+    ids.slice(i, i + CHUNK).forEach(id => batch.set(doc(db, EMPLOYEES_COL, id), { ativo: false, afastado: false, dataAgendada: '' }, { merge: true }));
     await batch.commit();
   }
 }
@@ -175,6 +178,7 @@ const STATUS_EXPORT_COLORS = {
   em_dia:    { fg: 'FF2F9E62', bg: 'FFE8F5EE' },
   agendado:  { fg: 'FF2E6E8E', bg: 'FFE6F1F6' },
   sem_exame: { fg: 'FF7B5EA7', bg: 'FFEEE9F5' },
+  afastado:  { fg: 'FFA6631B', bg: 'FFF5E9DA' },
   inativo:   { fg: 'FF7C8B87', bg: 'FFEEF1F0' },
 };
 async function exportIndicatorsXlsx() {
@@ -182,7 +186,7 @@ async function exportIndicatorsXlsx() {
   const enriched = state.employees.map(f => ({ ...f, status: getStatus(f) }));
   const ativos = state.employees.filter(f => f.ativo).length;
   const counts = enriched.reduce((acc, f) => { acc[f.status] = (acc[f.status] || 0) + 1; return acc; }, {});
-  const setorLabel = state.managerSetor || 'Painel';
+  const setorLabel = state.managerSetor === '*' ? 'Todos os setores' : (state.managerSetor || 'Painel');
 
   const wb = new window.ExcelJS.Workbook();
   wb.creator = 'Painel de ASOs';
@@ -214,7 +218,8 @@ async function exportIndicatorsXlsx() {
     ['Vencidos', counts.vencido || 0, STATUS_EXPORT_COLORS.vencido.fg],
     ['Agendados', counts.agendado || 0, STATUS_EXPORT_COLORS.agendado.fg],
     ['Sem exame', counts.sem_exame || 0, STATUS_EXPORT_COLORS.sem_exame.fg],
-    ['Inativos', counts.inativo || 0, STATUS_EXPORT_COLORS.inativo.fg],
+    ['Afastados', counts.afastado || 0, STATUS_EXPORT_COLORS.afastado.fg],
+    ['Desligados', counts.inativo || 0, STATUS_EXPORT_COLORS.inativo.fg],
   ];
   rowsDef.forEach(([label, value, color]) => {
     const r = resumo.addRow([label, value]);
@@ -266,6 +271,7 @@ async function exportIndicatorsXlsx() {
 
 function getStatus(f) {
   if (!f.ativo) return 'inativo';
+  if (f.afastado) return 'afastado';
   if (f.dataAgendada) {
     const ag = new Date(f.dataAgendada + 'T00:00:00');
     if (ag >= today) return 'agendado';
@@ -300,7 +306,6 @@ async function checkManagerStatus() {
     if (snap.exists()) {
       state.isManager = true;
       state.managerSetor = snap.data().setor || null;
-      state.departamento = state.managerSetor || 'Todos';
     } else {
       state.isManager = false;
       state.managerSetor = null;
@@ -313,7 +318,8 @@ async function checkManagerStatus() {
 
 function listenToEmployees() {
   if (unsubscribeSnapshot) unsubscribeSnapshot();
-  const ref = state.isManager && state.managerSetor
+  const isScopedManager = state.isManager && state.managerSetor && state.managerSetor !== '*';
+  const ref = isScopedManager
     ? query(collection(db, EMPLOYEES_COL), where('setor', '==', state.managerSetor))
     : collection(db, EMPLOYEES_COL);
   unsubscribeSnapshot = onSnapshot(ref, (snap) => {
@@ -389,7 +395,7 @@ function render() {
     <div class="header">
       <div>
         <div class="eyebrow">Controle de Saúde Ocupacional</div>
-        <h1 class="display">${state.isManager ? `Painel de Indicadores — ${escapeHtml(state.managerSetor || '')}` : 'Painel de ASOs'}</h1>
+        <h1 class="display">${state.isManager ? `Painel de Indicadores — ${state.managerSetor === '*' ? 'Todos os setores' : escapeHtml(state.managerSetor || '')}` : 'Painel de ASOs'}</h1>
         <div class="sub">${state.employees.length.toLocaleString('pt-BR')} colaborador(es)${state.isManager ? ' · modo consulta (somente leitura)' : ' no controle'}</div>
       </div>
       <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
@@ -410,7 +416,8 @@ function render() {
       ${countCard('Vencidos', counts.vencido || 0, 'var(--c-vencido)', 'vencido')}
       ${countCard('Agendados', counts.agendado || 0, 'var(--c-agendado)', 'agendado')}
       ${countCard('Sem exame', counts.sem_exame || 0, 'var(--c-semexame)', 'sem_exame')}
-      ${countCard('Inativos', counts.inativo || 0, 'var(--c-inativo)', 'inativo')}
+      ${countCard('Afastados', counts.afastado || 0, 'var(--c-afastado)', 'afastado')}
+      ${countCard('Desligados', counts.inativo || 0, 'var(--c-inativo)', 'inativo')}
     </div>
 
     <div class="toolbar">
@@ -478,16 +485,22 @@ function rowHtml(f) {
       <td class="mono">
         ${vencimento ? fmt(vencimento) : '—'}
         ${f.dataAgendada && f.status === 'agendado' ? `<div class="sched-note">agendado: ${fmt(f.dataAgendada)}</div>` : ''}
+        ${f.status === 'afastado' ? `<div class="afastado-note">afastado desde ${fmt(f.dataAfastamento)}${f.dataRetorno ? ' · retorno previsto ' + fmt(f.dataRetorno) : ''}</div>` : ''}
       </td>
       <td><span class="badge" style="background:${meta.bg};color:${meta.color}">${meta.label}</span></td>
       <td>
         <div class="row-actions">
-          ${state.isManager ? '<span style="color:#8A9793;font-size:12px">—</span>' : (f.ativo ? `
+          ${state.isManager ? '<span style="color:#8A9793;font-size:12px">—</span>' : (f.ativo ? (f.afastado ? `
+            <button class="icon-btn" title="Editar" data-action="edit" data-id="${f.id}">${ICONS.edit}</button>
+            <button class="icon-btn" title="Registrar retorno" data-action="retornar" data-id="${f.id}">${ICONS.rotate}</button>
+            <button class="icon-btn" title="Desligado" data-action="desligar" data-id="${f.id}">${ICONS.userx}</button>
+          ` : `
             <button class="icon-btn" title="Marcar como agendado" data-action="agendar" data-id="${f.id}">${ICONS.calendar}</button>
             <button class="icon-btn" title="Marcar como realizado" data-action="realizar" data-id="${f.id}">${ICONS.check}</button>
             <button class="icon-btn" title="Editar" data-action="edit" data-id="${f.id}">${ICONS.edit}</button>
-            <button class="icon-btn" title="Inativar (desligado)" data-action="inativar" data-id="${f.id}">${ICONS.userx}</button>
-          ` : `<button class="icon-btn" title="Reativar" data-action="reativar" data-id="${f.id}">${ICONS.usercheck}</button>`)}
+            <button class="icon-btn" title="Afastar (licença/afastamento)" data-action="afastar" data-id="${f.id}">${ICONS.pause}</button>
+            <button class="icon-btn" title="Desligado" data-action="desligar" data-id="${f.id}">${ICONS.userx}</button>
+          `) : `<button class="icon-btn" title="Reativar" data-action="reativar" data-id="${f.id}">${ICONS.usercheck}</button>`)}
           ${state.isManager ? '' : `<button class="icon-btn" title="Excluir permanentemente" data-action="delete" data-id="${f.id}">${ICONS.trash}</button>`}
         </div>
       </td>
@@ -537,7 +550,9 @@ function attachEvents() {
       else if (action === 'realizar') openModal('realizar', f);
       else if (action === 'edit') openModal('edit', f);
       else if (action === 'delete') openModal('delete', f);
-      else if (action === 'inativar') updateEmployee(id, { ativo: false, dataAgendada: '' });
+      else if (action === 'afastar') openModal('afastar', f);
+      else if (action === 'retornar') openModal('retornar', f);
+      else if (action === 'desligar') updateEmployee(id, { ativo: false, afastado: false, dataAgendada: '' });
       else if (action === 'reativar') updateEmployee(id, { ativo: true });
     };
   });
@@ -546,6 +561,7 @@ function attachEvents() {
 const TITLES = {
   add: 'Novo colaborador', edit: 'Editar colaborador',
   agendar: 'Marcar exame como agendado', realizar: 'Registrar exame realizado',
+  afastar: 'Registrar afastamento', retornar: 'Registrar retorno',
   delete: 'Excluir registro permanentemente',
   'import-new': 'Importar novos colaboradores', 'import-dismiss': 'Importar desligamentos em lote',
 };
@@ -613,9 +629,33 @@ function openModal(type, f) {
       updateEmployee(f.id, { ultimaData: val, dataAgendada: '' });
       closeModal(); showToast('Exame registrado como realizado.');
     };
+  } else if (type === 'afastar') {
+    body.innerHTML = `
+      <p style="font-size:14px;color:var(--muted);margin-top:0">Registre o afastamento de <strong>${escapeHtml(f.nome)}</strong> (licença médica, INSS, etc). O colaborador continua ativo, mas fica marcado como afastado até o retorno.</p>
+      <label class="field-label">Data de afastamento</label><input type="date" class="field-input" id="f-afastamento" value="${f.dataAfastamento || ''}">
+      <label class="field-label">Data prevista de retorno (opcional)</label><input type="date" class="field-input" id="f-retorno" value="${f.dataRetorno || ''}">
+      <button class="modal-primary" style="background:#A6631B" id="modal-save">Confirmar afastamento</button>`;
+    document.getElementById('modal-save').onclick = () => {
+      const inicio = document.getElementById('f-afastamento').value;
+      const previsto = document.getElementById('f-retorno').value;
+      if (!inicio) { showToast('Informe a data de afastamento.', true); return; }
+      updateEmployee(f.id, { afastado: true, dataAfastamento: inicio, dataRetorno: previsto || '' });
+      closeModal(); showToast('Afastamento registrado.');
+    };
+  } else if (type === 'retornar') {
+    body.innerHTML = `
+      <p style="font-size:14px;color:var(--muted);margin-top:0">Confirme o retorno de <strong>${escapeHtml(f.nome)}</strong> ao trabalho.</p>
+      <label class="field-label">Data de retorno</label><input type="date" class="field-input" id="f-data" value="${f.dataRetorno || new Date().toISOString().slice(0, 10)}">
+      <button class="modal-primary" style="background:#2F9E62" id="modal-save">Confirmar retorno</button>`;
+    document.getElementById('modal-save').onclick = () => {
+      const val = document.getElementById('f-data').value;
+      if (!val) { showToast('Escolha uma data.', true); return; }
+      updateEmployee(f.id, { afastado: false, dataRetorno: val });
+      closeModal(); showToast('Retorno registrado.');
+    };
   } else if (type === 'delete') {
     body.innerHTML = `
-      <div class="warn-box">${ICONS.alert}<p>Isso removerá <strong>${escapeHtml(f.nome)}</strong> e todo o histórico permanentemente. Se o colaborador foi apenas desligado, prefira "Inativar" para manter o histórico.</p></div>
+      <div class="warn-box">${ICONS.alert}<p>Isso removerá <strong>${escapeHtml(f.nome)}</strong> e todo o histórico permanentemente. Se o colaborador foi apenas desligado, prefira "Desligado" para manter o histórico.</p></div>
       <button class="modal-primary" style="background:#C4432E" id="modal-save">Excluir permanentemente</button>`;
     document.getElementById('modal-save').onclick = () => { deleteEmployee(f.id); closeModal(); };
   } else if (type === 'import-new' || type === 'import-dismiss') {
@@ -624,7 +664,7 @@ function openModal(type, f) {
       <p style="font-size:13.5px;color:var(--muted);margin-top:0">
         ${isNew
           ? 'Envie uma planilha (.xlsx ou .csv) com uma linha por colaborador. Colunas aceitas no cabeçalho:'
-          : 'Envie uma planilha (.xlsx ou .csv) com os colaboradores desligados. Eles serão marcados como <strong>inativos</strong> (o histórico é mantido — nada é excluído). Coluna aceita no cabeçalho:'}
+          : 'Envie uma planilha (.xlsx ou .csv) com os colaboradores desligados. Eles serão marcados como <strong>desligados</strong> (o histórico é mantido — nada é excluído). Coluna aceita no cabeçalho:'}
       </p>
       <div class="mono" style="font-size:12px;background:#F7F9F8;padding:10px;border-radius:6px;margin-bottom:12px;overflow-x:auto">
         ${isNew ? 'nome | matricula | cargo | departamento | setor | ultimaData | periodicidade' : 'matricula (ou nome, se não tiver matrícula)'}
@@ -660,7 +700,7 @@ function openModal(type, f) {
           const { matched, notFound } = buildDismissalsFromRows(rows, state.employees);
           ready = matched;
           preview.innerHTML = `${matched.length} colaborador(es) serão marcados como desligados.` +
-            (notFound.length ? `<br><span style="color:var(--c-vencido)">${notFound.length} não encontrado(s) ou já inativo(s): ${escapeHtml(notFound.slice(0, 5).join(', '))}${notFound.length > 5 ? '…' : ''}</span>` : '');
+            (notFound.length ? `<br><span style="color:var(--c-vencido)">${notFound.length} não encontrado(s) ou já desligado(s): ${escapeHtml(notFound.slice(0, 5).join(', '))}${notFound.length > 5 ? '…' : ''}</span>` : '');
         }
         saveBtn.disabled = !ready || ready.length === 0;
       } catch (e) {
