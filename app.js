@@ -27,6 +27,7 @@ const ICONS = {
   x: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#16211F" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>',
   alert: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#C4432E" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><path d="M12 9v4M12 17h.01"/></svg>',
   upload: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>',
+  sheet: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9M15 9v12"/></svg>',
 };
 
 const STATUS_META = {
@@ -166,6 +167,103 @@ async function bulkDismiss(ids) {
   }
 }
 
+// ---- Exportar planilha de indicadores (.xlsx formatado) ----
+const STATUS_EXPORT_COLORS = {
+  vencido:   { fg: 'FFC4432E', bg: 'FFFBE7E2' },
+  vence30:   { fg: 'FFC98A1E', bg: 'FFFBF1DF' },
+  vence90:   { fg: 'FFB79A1E', bg: 'FFF8F3D9' },
+  em_dia:    { fg: 'FF2F9E62', bg: 'FFE8F5EE' },
+  agendado:  { fg: 'FF2E6E8E', bg: 'FFE6F1F6' },
+  sem_exame: { fg: 'FF7B5EA7', bg: 'FFEEE9F5' },
+  inativo:   { fg: 'FF7C8B87', bg: 'FFEEF1F0' },
+};
+async function exportIndicatorsXlsx() {
+  if (!window.ExcelJS) { showToast('Biblioteca de planilha não carregou. Recarregue a página e tente de novo.', true); return; }
+  const enriched = state.employees.map(f => ({ ...f, status: getStatus(f) }));
+  const ativos = state.employees.filter(f => f.ativo).length;
+  const counts = enriched.reduce((acc, f) => { acc[f.status] = (acc[f.status] || 0) + 1; return acc; }, {});
+  const setorLabel = state.managerSetor || 'Painel';
+
+  const wb = new window.ExcelJS.Workbook();
+  wb.creator = 'Painel de ASOs';
+  wb.created = new Date();
+
+  // ---- Aba 1: Resumo ----
+  const resumo = wb.addWorksheet('Resumo');
+  resumo.columns = [{ width: 30 }, { width: 16 }];
+  resumo.mergeCells('A1:B1');
+  resumo.getCell('A1').value = `Painel de Indicadores — ${setorLabel}`;
+  resumo.getCell('A1').font = { bold: true, size: 16, color: { argb: 'FF1A1A1A' } };
+  resumo.mergeCells('A2:B2');
+  resumo.getCell('A2').value = `Gerado em ${new Date().toLocaleString('pt-BR')}`;
+  resumo.getCell('A2').font = { italic: true, size: 10, color: { argb: 'FF6B6B6B' } };
+  resumo.addRow([]);
+
+  const headerRow = resumo.addRow(['Indicador', 'Quantidade']);
+  headerRow.eachCell(c => {
+    c.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+    c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1A1A1A' } };
+    c.alignment = { horizontal: 'center' };
+  });
+
+  const rowsDef = [
+    ['Total ativos', ativos, 'FF1A1A1A'],
+    ['Em dia', counts.em_dia || 0, STATUS_EXPORT_COLORS.em_dia.fg],
+    ['Vence em 90 dias', counts.vence90 || 0, STATUS_EXPORT_COLORS.vence90.fg],
+    ['Vence em 30 dias', counts.vence30 || 0, STATUS_EXPORT_COLORS.vence30.fg],
+    ['Vencidos', counts.vencido || 0, STATUS_EXPORT_COLORS.vencido.fg],
+    ['Agendados', counts.agendado || 0, STATUS_EXPORT_COLORS.agendado.fg],
+    ['Sem exame', counts.sem_exame || 0, STATUS_EXPORT_COLORS.sem_exame.fg],
+    ['Inativos', counts.inativo || 0, STATUS_EXPORT_COLORS.inativo.fg],
+  ];
+  rowsDef.forEach(([label, value, color]) => {
+    const r = resumo.addRow([label, value]);
+    r.getCell(1).font = { color: { argb: color }, bold: true };
+    r.getCell(2).font = { color: { argb: color }, bold: true };
+    r.getCell(2).alignment = { horizontal: 'center' };
+    r.eachCell(c => { c.border = { bottom: { style: 'thin', color: { argb: 'FFDCDCDC' } } }; });
+  });
+
+  // ---- Aba 2: Colaboradores ----
+  const det = wb.addWorksheet('Colaboradores');
+  det.columns = [
+    { header: 'Nome', key: 'nome', width: 30 },
+    { header: 'Matrícula', key: 'matricula', width: 14 },
+    { header: 'Cargo', key: 'cargo', width: 22 },
+    { header: 'Última realização', key: 'ultimaData', width: 18 },
+    { header: 'Vencimento', key: 'vencimento', width: 16 },
+    { header: 'Status', key: 'status', width: 18 },
+  ];
+  det.getRow(1).eachCell(c => {
+    c.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+    c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1A1A1A' } };
+  });
+  enriched
+    .filter(f => f.ativo)
+    .sort((a, b) => a.status.localeCompare(b.status))
+    .forEach(f => {
+      const meta = STATUS_META[f.status];
+      const colors = STATUS_EXPORT_COLORS[f.status];
+      const vencimento = f.ultimaData ? addMonths(f.ultimaData, f.periodicidade || 12) : null;
+      const row = det.addRow({
+        nome: f.nome, matricula: f.matricula || '', cargo: f.cargo || '',
+        ultimaData: fmt(f.ultimaData), vencimento: vencimento ? fmt(vencimento) : '—', status: meta.label,
+      });
+      const statusCell = row.getCell('status');
+      statusCell.font = { bold: true, color: { argb: colors.fg } };
+      statusCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: colors.bg } };
+    });
+
+  const buffer = await wb.xlsx.writeBuffer();
+  const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `indicadores_${setorLabel.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '_')}_${new Date().toISOString().slice(0, 10)}.xlsx`;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+}
+
 function getStatus(f) {
   if (!f.ativo) return 'inativo';
   if (f.dataAgendada) {
@@ -295,7 +393,7 @@ function render() {
         <div class="sub">${state.employees.length.toLocaleString('pt-BR')} colaborador(es)${state.isManager ? ' · modo consulta (somente leitura)' : ' no controle'}</div>
       </div>
       <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-        ${state.isManager ? '' : `
+        ${state.isManager ? `<button class="icon-btn-header" id="btn-export-xlsx" title="Baixar planilha de indicadores">${ICONS.sheet}</button>` : `
           <button class="btn-secondary" id="btn-import-new">${ICONS.upload} Importar colaboradores</button>
           <button class="btn-secondary" id="btn-import-dismiss">${ICONS.upload} Importar desligamentos</button>
           <button class="btn-add" id="btn-add">${ICONS.plus} Novo colaborador</button>
@@ -406,6 +504,8 @@ function attachEvents() {
   if (btnImportNew) btnImportNew.onclick = () => openModal('import-new');
   const btnImportDismiss = document.getElementById('btn-import-dismiss');
   if (btnImportDismiss) btnImportDismiss.onclick = () => openModal('import-dismiss');
+  const btnExport = document.getElementById('btn-export-xlsx');
+  if (btnExport) btnExport.onclick = exportIndicatorsXlsx;
   document.getElementById('btn-logout').onclick = () => signOut(auth);
   document.getElementById('input-busca').oninput = (e) => {
     state.busca = e.target.value;
