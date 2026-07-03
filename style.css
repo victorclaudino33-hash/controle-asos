@@ -14,6 +14,7 @@
   --c-emdia: #2F9E62;     --c-emdia-bg: #E8F5EE;
   --c-agendado: #2E6E8E;  --c-agendado-bg: #E6F1F6;
   --c-semexame: #7B5EA7;  --c-semexame-bg: #EEE9F5;
+  --c-afastado: #A6631B;  --c-afastado-bg: #F5E9DA;
   --c-inativo: #7C8B87;   --c-inativo-bg: #EEF1F0;
 }
 
@@ -54,11 +55,6 @@ table { border-collapse: collapse; width: 100%; }
   border-radius: 8px; font-weight: 600; font-size: 13.5px; display: flex; align-items: center; gap: 7px;
 }
 .btn-secondary:hover { background: rgba(255,255,255,0.18); }
-.icon-btn-header {
-  background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.3); border-radius: 8px;
-  padding: 9px; display: inline-flex; align-items: center; justify-content: center;
-}
-.icon-btn-header:hover { background: rgba(255,255,255,0.18); }
 
 /* Counters */
 .counters { padding: 22px 32px 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
@@ -97,6 +93,7 @@ tbody tr { border-left: 4px solid transparent; }
 .icon-btn:hover { background: rgba(0,0,0,0.06); }
 .empty-row td { padding: 32px; text-align: center; color: #7C8B87; }
 .sched-note { font-size: 11px; color: var(--c-agendado); margin-top: 2px; }
+.afastado-note { font-size: 11px; color: var(--c-afastado); margin-top: 2px; }
 
 /* Pagination */
 .pagination { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; font-size: 13px; color: var(--muted); border-top: 1px solid var(--border); background: #FAFBFA; }
