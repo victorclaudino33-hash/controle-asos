@@ -1,11 +1,11 @@
 :root {
-  --pine: #14453D;
-  --pine-dark: #0D302A;
-  --gold: #C9A227;
-  --bg: #F0F3F2;
-  --text: #16211F;
-  --muted: #5B6B67;
-  --border: #E1E7E5;
+  --pine: #1A1A1A;
+  --pine-dark: #000000;
+  --gold: #C62828;
+  --bg: #F2F2F2;
+  --text: #1A1A1A;
+  --muted: #6B6B6B;
+  --border: #DCDCDC;
   --surface: #FFFFFF;
 
   --c-vencido: #C4432E;   --c-vencido-bg: #FBE7E2;
@@ -46,9 +46,14 @@ table { border-collapse: collapse; width: 100%; }
 .header h1 { font-size: 26px; font-weight: 700; margin: 0; }
 .header .sub { font-size: 13px; color: #B9D8CF; margin-top: 4px; }
 .btn-add {
-  background: var(--gold); color: #2A2000; border: none; padding: 11px 18px; border-radius: 8px;
+  background: var(--gold); color: #fff; border: none; padding: 11px 18px; border-radius: 8px;
   font-weight: 600; font-size: 14px; display: flex; align-items: center; gap: 8px;
 }
+.btn-secondary {
+  background: rgba(255,255,255,0.1); color: #fff; border: 1px solid rgba(255,255,255,0.3); padding: 10px 16px;
+  border-radius: 8px; font-weight: 600; font-size: 13.5px; display: flex; align-items: center; gap: 7px;
+}
+.btn-secondary:hover { background: rgba(255,255,255,0.18); }
 
 /* Counters */
 .counters { padding: 22px 32px 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
