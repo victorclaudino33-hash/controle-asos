@@ -26,6 +26,7 @@ const ICONS = {
   trash: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#8A9793" stroke-width="2"><path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6h14z"/></svg>',
   x: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#16211F" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>',
   alert: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#C4432E" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><path d="M12 9v4M12 17h.01"/></svg>',
+  upload: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>',
 };
 
 const STATUS_META = {
@@ -52,6 +53,118 @@ function fmt(dateStr) {
   return d.toLocaleDateString('pt-BR');
 }
 function daysBetween(a, b) { return Math.round((a - b) / 86400000); }
+
+// ---- Importação de planilhas (novos colaboradores / desligamentos) ----
+const FIELD_MAP = {
+  nome: 'nome', name: 'nome', colaborador: 'nome',
+  matricula: 'matricula', re: 'matricula', registro: 'matricula', matriculare: 'matricula',
+  cargo: 'cargo', funcao: 'cargo', função: 'cargo',
+  departamento: 'departamento', depto: 'departamento',
+  setor: 'setor', area: 'setor',
+  ultimadata: 'ultimaData', data: 'ultimaData', dataultimarealizacao: 'ultimaData',
+  ultimarealizacao: 'ultimaData', dataexame: 'ultimaData', dataultima: 'ultimaData',
+  periodicidade: 'periodicidade', meses: 'periodicidade', periodicidademeses: 'periodicidade',
+};
+function normalizeKey(k) {
+  return (k ?? '').toString().trim().toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]/g, '');
+}
+function parseDateFlexible(val) {
+  if (val === undefined || val === null || val === '') return '';
+  if (val instanceof Date) {
+    const y = val.getFullYear(), m = String(val.getMonth() + 1).padStart(2, '0'), d = String(val.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+  const s = val.toString().trim();
+  let m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
+  if (m) {
+    let [, dd, mm, yy] = m;
+    if (yy.length === 2) yy = '20' + yy;
+    return `${yy}-${mm.padStart(2, '0')}-${dd.padStart(2, '0')}`;
+  }
+  m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (m) { const [, yy, mm, dd] = m; return `${yy}-${mm.padStart(2, '0')}-${dd.padStart(2, '0')}`; }
+  return '';
+}
+function parseSpreadsheet(file) {
+  return new Promise((resolve, reject) => {
+    if (!window.XLSX) { reject(new Error('Biblioteca de planilha não carregou. Recarregue a página e tente de novo.')); return; }
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Falha ao ler o arquivo.'));
+    reader.onload = (e) => {
+      try {
+        const wb = window.XLSX.read(e.target.result, { type: 'array', cellDates: true });
+        const sheet = wb.Sheets[wb.SheetNames[0]];
+        const rows = window.XLSX.utils.sheet_to_json(sheet, { header: 1, raw: true, defval: '' });
+        if (!rows.length) { resolve([]); return; }
+        const headers = rows[0].map(normalizeKey);
+        const objs = rows.slice(1)
+          .filter(r => r.some(c => c !== '' && c !== null && c !== undefined))
+          .map(r => {
+            const obj = {};
+            headers.forEach((h, i) => { const field = FIELD_MAP[h]; if (field) obj[field] = r[i]; });
+            return obj;
+          });
+        resolve(objs);
+      } catch (err) { reject(new Error('Não consegui ler esse arquivo. Confira se é .xlsx, .xls ou .csv.')); }
+    };
+    reader.readAsArrayBuffer(file);
+  });
+}
+function buildNewEmployeesFromRows(rows) {
+  const valid = [], errors = [];
+  rows.forEach((r, i) => {
+    const nome = (r.nome || '').toString().trim();
+    const ultimaData = parseDateFlexible(r.ultimaData);
+    if (!nome || !ultimaData) { errors.push(nome || `linha ${i + 2}`); return; }
+    const matricula = (r.matricula || '').toString().trim();
+    valid.push({
+      id: matricula ? 'mat_' + matricula.replace(/[^\w-]/g, '') : 'novo_' + Date.now() + '_' + i,
+      nome, matricula,
+      cargo: (r.cargo || '').toString().trim(),
+      departamento: (r.departamento || '').toString().trim(),
+      setor: (r.setor || '').toString().trim(),
+      ultimaData,
+      periodicidade: Number(r.periodicidade) || 12,
+      dataAgendada: '', ativo: true,
+    });
+  });
+  return { valid, errors };
+}
+function buildDismissalsFromRows(rows, employees) {
+  const byMatricula = new Map(), byNome = new Map();
+  employees.forEach(f => {
+    if (f.matricula) byMatricula.set(f.matricula.toString().trim(), f);
+    if (f.nome) byNome.set(f.nome.toString().trim().toLowerCase(), f);
+  });
+  const matched = [], notFound = [];
+  rows.forEach(r => {
+    const matricula = (r.matricula || '').toString().trim();
+    const nome = (r.nome || '').toString().trim();
+    let f = matricula ? byMatricula.get(matricula) : null;
+    if (!f && nome) f = byNome.get(nome.toLowerCase());
+    if (f && f.ativo) matched.push(f.id);
+    else if (!f) notFound.push(matricula || nome || '(linha sem matrícula/nome)');
+  });
+  return { matched, notFound };
+}
+async function bulkImportNew(list) {
+  const CHUNK = 400;
+  for (let i = 0; i < list.length; i += CHUNK) {
+    const batch = writeBatch(db);
+    list.slice(i, i + CHUNK).forEach(emp => batch.set(doc(db, EMPLOYEES_COL, emp.id), emp, { merge: true }));
+    await batch.commit();
+  }
+}
+async function bulkDismiss(ids) {
+  const CHUNK = 400;
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const batch = writeBatch(db);
+    ids.slice(i, i + CHUNK).forEach(id => batch.set(doc(db, EMPLOYEES_COL, id), { ativo: false, dataAgendada: '' }, { merge: true }));
+    await batch.commit();
+  }
+}
 
 function getStatus(f) {
   if (!f.ativo) return 'inativo';
@@ -179,8 +292,12 @@ function render() {
         <h1 class="display">${state.isManager ? `Painel de Indicadores — ${escapeHtml(state.managerSetor || '')}` : 'Painel de ASOs'}</h1>
         <div class="sub">${state.employees.length.toLocaleString('pt-BR')} colaborador(es)${state.isManager ? ' · modo consulta (somente leitura)' : ' no controle'}</div>
       </div>
-      <div style="display:flex;align-items:center;gap:12px">
-        ${state.isManager ? '' : `<button class="btn-add" id="btn-add">${ICONS.plus} Novo colaborador</button>`}
+      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+        ${state.isManager ? '' : `
+          <button class="btn-secondary" id="btn-import-new">${ICONS.upload} Importar colaboradores</button>
+          <button class="btn-secondary" id="btn-import-dismiss">${ICONS.upload} Importar desligamentos</button>
+          <button class="btn-add" id="btn-add">${ICONS.plus} Novo colaborador</button>
+        `}
         <button class="logout-btn" id="btn-logout">Sair (${escapeHtml(auth.currentUser ? auth.currentUser.email : '')})</button>
       </div>
     </div>
@@ -283,6 +400,10 @@ function escapeAttr(s) { return escapeHtml(s); }
 function attachEvents() {
   const btnAdd = document.getElementById('btn-add');
   if (btnAdd) btnAdd.onclick = () => openModal('add');
+  const btnImportNew = document.getElementById('btn-import-new');
+  if (btnImportNew) btnImportNew.onclick = () => openModal('import-new');
+  const btnImportDismiss = document.getElementById('btn-import-dismiss');
+  if (btnImportDismiss) btnImportDismiss.onclick = () => openModal('import-dismiss');
   document.getElementById('btn-logout').onclick = () => signOut(auth);
   document.getElementById('input-busca').oninput = (e) => {
     state.busca = e.target.value;
@@ -324,6 +445,7 @@ const TITLES = {
   add: 'Novo colaborador', edit: 'Editar colaborador',
   agendar: 'Marcar exame como agendado', realizar: 'Registrar exame realizado',
   delete: 'Excluir registro permanentemente',
+  'import-new': 'Importar novos colaboradores', 'import-dismiss': 'Importar desligamentos em lote',
 };
 
 function openModal(type, f) {
@@ -394,6 +516,70 @@ function openModal(type, f) {
       <div class="warn-box">${ICONS.alert}<p>Isso removerá <strong>${escapeHtml(f.nome)}</strong> e todo o histórico permanentemente. Se o colaborador foi apenas desligado, prefira "Inativar" para manter o histórico.</p></div>
       <button class="modal-primary" style="background:#C4432E" id="modal-save">Excluir permanentemente</button>`;
     document.getElementById('modal-save').onclick = () => { deleteEmployee(f.id); closeModal(); };
+  } else if (type === 'import-new' || type === 'import-dismiss') {
+    const isNew = type === 'import-new';
+    body.innerHTML = `
+      <p style="font-size:13.5px;color:var(--muted);margin-top:0">
+        ${isNew
+          ? 'Envie uma planilha (.xlsx ou .csv) com uma linha por colaborador. Colunas aceitas no cabeçalho:'
+          : 'Envie uma planilha (.xlsx ou .csv) com os colaboradores desligados. Eles serão marcados como <strong>inativos</strong> (o histórico é mantido — nada é excluído). Coluna aceita no cabeçalho:'}
+      </p>
+      <div class="mono" style="font-size:12px;background:#F7F9F8;padding:10px;border-radius:6px;margin-bottom:12px;overflow-x:auto">
+        ${isNew ? 'nome | matricula | cargo | departamento | setor | ultimaData | periodicidade' : 'matricula (ou nome, se não tiver matrícula)'}
+      </div>
+      <p style="font-size:12.5px;color:var(--muted)">
+        ${isNew
+          ? '<strong>nome</strong> e <strong>ultimaData</strong> são obrigatórios (data no formato dd/mm/aaaa). <strong>periodicidade</strong> em meses — se vazio, assume 12. Se a matrícula já existir no sistema, o colaborador é atualizado em vez de duplicado.'
+          : 'Usamos a <strong>matrícula</strong> para encontrar o colaborador certo (mais confiável que o nome). Quem não for encontrado aparece listado abaixo pra você conferir.'}
+      </p>
+      <input type="file" id="import-file-input" accept=".xlsx,.xls,.csv" class="field-input" style="padding:8px">
+      <div id="import-preview" style="font-size:13px;color:var(--muted);min-height:20px;margin:4px 0 14px"></div>
+      <button class="modal-primary" style="background:#14453D" id="modal-save" disabled>${isNew ? 'Importar colaboradores' : 'Confirmar desligamentos'}</button>
+    `;
+    const fileInput = document.getElementById('import-file-input');
+    const preview = document.getElementById('import-preview');
+    const saveBtn = document.getElementById('modal-save');
+    let ready = null;
+
+    fileInput.onchange = async () => {
+      const file = fileInput.files[0];
+      if (!file) return;
+      preview.textContent = 'Lendo planilha…';
+      saveBtn.disabled = true;
+      ready = null;
+      try {
+        const rows = await parseSpreadsheet(file);
+        if (isNew) {
+          const { valid, errors } = buildNewEmployeesFromRows(rows);
+          ready = valid;
+          preview.innerHTML = `${valid.length} colaborador(es) prontos para importar.` +
+            (errors.length ? `<br><span style="color:var(--c-vencido)">${errors.length} linha(s) ignorada(s) por falta de nome/data: ${escapeHtml(errors.slice(0, 5).join(', '))}${errors.length > 5 ? '…' : ''}</span>` : '');
+        } else {
+          const { matched, notFound } = buildDismissalsFromRows(rows, state.employees);
+          ready = matched;
+          preview.innerHTML = `${matched.length} colaborador(es) serão marcados como desligados.` +
+            (notFound.length ? `<br><span style="color:var(--c-vencido)">${notFound.length} não encontrado(s) ou já inativo(s): ${escapeHtml(notFound.slice(0, 5).join(', '))}${notFound.length > 5 ? '…' : ''}</span>` : '');
+        }
+        saveBtn.disabled = !ready || ready.length === 0;
+      } catch (e) {
+        preview.innerHTML = `<span style="color:var(--c-vencido)">${escapeHtml(e.message)}</span>`;
+      }
+    };
+
+    saveBtn.onclick = async () => {
+      if (!ready || !ready.length) return;
+      saveBtn.disabled = true;
+      saveBtn.textContent = 'Importando…';
+      try {
+        if (isNew) { await bulkImportNew(ready); showToast(`${ready.length} colaborador(es) importado(s).`); }
+        else { await bulkDismiss(ready); showToast(`${ready.length} colaborador(es) marcado(s) como desligados.`); }
+        closeModal();
+      } catch (e) {
+        showToast('Não foi possível concluir a importação: ' + e.message, true);
+        saveBtn.disabled = false;
+        saveBtn.textContent = isNew ? 'Importar colaboradores' : 'Confirmar desligamentos';
+      }
+    };
   }
 }
 function closeModal() { document.getElementById('modal-root').innerHTML = ''; }
