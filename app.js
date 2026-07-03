@@ -186,7 +186,7 @@ async function exportIndicatorsXlsx() {
   const enriched = state.employees.map(f => ({ ...f, status: getStatus(f) }));
   const ativos = state.employees.filter(f => f.ativo).length;
   const counts = enriched.reduce((acc, f) => { acc[f.status] = (acc[f.status] || 0) + 1; return acc; }, {});
-  const setorLabel = state.managerSetor === '*' ? 'Todos os setores' : (state.managerSetor || 'Painel');
+  const setorLabel = !state.isManager ? 'Todos os setores' : (state.managerSetor === '*' ? 'Todos os setores' : (state.managerSetor || 'Painel'));
 
   const wb = new window.ExcelJS.Workbook();
   wb.creator = 'Painel de ASOs';
@@ -399,9 +399,10 @@ function render() {
         <div class="sub">${state.employees.length.toLocaleString('pt-BR')} colaborador(es)${state.isManager ? ' · modo consulta (somente leitura)' : ' no controle'}</div>
       </div>
       <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-        ${state.isManager ? `<button class="icon-btn-header" id="btn-export-xlsx" title="Baixar planilha de indicadores">${ICONS.sheet}</button>` : `
+        ${state.isManager ? `<button class="btn-secondary" id="btn-export-xlsx">${ICONS.sheet} Baixar indicadores</button>` : `
           <button class="btn-secondary" id="btn-import-new">${ICONS.upload} Importar colaboradores</button>
           <button class="btn-secondary" id="btn-import-dismiss">${ICONS.upload} Importar desligamentos</button>
+          <button class="btn-secondary" id="btn-export-xlsx">${ICONS.sheet} Baixar indicadores</button>
           <button class="btn-add" id="btn-add">${ICONS.plus} Novo colaborador</button>
         `}
         <button class="logout-btn" id="btn-logout">Sair (${escapeHtml(auth.currentUser ? auth.currentUser.email : '')})</button>
