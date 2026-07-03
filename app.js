@@ -182,7 +182,9 @@ function getStatus(f) {
 }
 
 async function seedIfEmpty() {
-  const snap = await getDocs(collection(db, EMPLOYEES_COL));
+  let snap;
+  try { snap = await getDocs(collection(db, EMPLOYEES_COL)); }
+  catch (e) { return; } // sem permissão pra listar tudo (ex: gestor) — não faz nada
   if (!snap.empty) return;
   const res = await fetch('data.json');
   const seed = await res.json();
