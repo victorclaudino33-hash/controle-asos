@@ -16,7 +16,7 @@ let unsubscribeSnapshot = null;
 
 const ICONS = {
   search: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#7C8B87" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>',
-  plus: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#2A2000" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>',
+  plus: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>',
   chevron: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#7C8B87" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>',
   calendar: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#2E6E8E" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>',
   check: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#2F9E62" stroke-width="2.5"><path d="M20 6L9 17l-5-5"/></svg>',
@@ -235,7 +235,7 @@ async function removeEmployee(id) {
 
 function showToast(msg, isError) {
   const root = document.getElementById('toast-root');
-  root.innerHTML = `<div class="toast" style="background:${isError ? '#C4432E' : '#14453D'}">${msg}</div>`;
+  root.innerHTML = `<div class="toast" style="background:${isError ? '#C4432E' : '#1A1A1A'}">${msg}</div>`;
   setTimeout(() => { root.innerHTML = ''; }, 2800);
 }
 
@@ -472,7 +472,7 @@ function openModal(type, f) {
       <label class="field-label">Setor</label><input class="field-input" id="f-setor" value="${escapeAttr(d.setor)}">
       <label class="field-label">Data da última realização</label><input type="date" class="field-input" id="f-ultimaData" value="${d.ultimaData || ''}">
       <label class="field-label">Periodicidade (meses)</label><input type="number" class="field-input" id="f-periodicidade" value="${d.periodicidade || 12}">
-      <button class="modal-primary" style="background:#14453D" id="modal-save">${type === 'add' ? 'Adicionar colaborador' : 'Salvar alterações'}</button>
+      <button class="modal-primary" style="background:#1A1A1A" id="modal-save">${type === 'add' ? 'Adicionar colaborador' : 'Salvar alterações'}</button>
     `;
     document.getElementById('modal-save').onclick = () => {
       const data = {
@@ -534,7 +534,7 @@ function openModal(type, f) {
       </p>
       <input type="file" id="import-file-input" accept=".xlsx,.xls,.csv" class="field-input" style="padding:8px">
       <div id="import-preview" style="font-size:13px;color:var(--muted);min-height:20px;margin:4px 0 14px"></div>
-      <button class="modal-primary" style="background:#14453D" id="modal-save" disabled>${isNew ? 'Importar colaboradores' : 'Confirmar desligamentos'}</button>
+      <button class="modal-primary" style="background:#1A1A1A" id="modal-save" disabled>${isNew ? 'Importar colaboradores' : 'Confirmar desligamentos'}</button>
     `;
     const fileInput = document.getElementById('import-file-input');
     const preview = document.getElementById('import-preview');
@@ -596,7 +596,7 @@ function renderLogin(errorMsg) {
         <input class="field-input" id="login-email" type="email" placeholder="voce@empresa.com">
         <label class="field-label">Senha</label>
         <input class="field-input" id="login-senha" type="password">
-        <button class="modal-primary" style="background:#14453D" id="login-btn">Entrar</button>
+        <button class="modal-primary" style="background:#1A1A1A" id="login-btn">Entrar</button>
       </div>
     </div>`;
   document.getElementById('login-btn').onclick = doLogin;
