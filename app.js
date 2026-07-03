@@ -1,6 +1,6 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import {
-  getFirestore, collection, doc, getDocs, setDoc, deleteDoc, onSnapshot, writeBatch
+  getFirestore, collection, doc, getDoc, getDocs, setDoc, deleteDoc, onSnapshot, writeBatch, query, where
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import {
   getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut
@@ -38,7 +38,7 @@ const STATUS_META = {
   inativo:   { label: 'Inativo',                  color: 'var(--c-inativo)',   bg: 'var(--c-inativo-bg)' },
 };
 
-let state = { employees: [], busca: '', departamento: 'Todos', status: 'Todos', page: 1 };
+let state = { employees: [], busca: '', departamento: 'Todos', status: 'Todos', page: 1, isManager: false, managerSetor: null };
 const today = new Date(); today.setHours(0,0,0,0);
 
 function addMonths(dateStr, months) {
@@ -81,9 +81,29 @@ async function seedIfEmpty() {
   }
 }
 
+async function checkManagerStatus() {
+  try {
+    const snap = await getDoc(doc(db, 'managers', auth.currentUser.email));
+    if (snap.exists()) {
+      state.isManager = true;
+      state.managerSetor = snap.data().setor || null;
+      state.departamento = state.managerSetor || 'Todos';
+    } else {
+      state.isManager = false;
+      state.managerSetor = null;
+    }
+  } catch (e) {
+    state.isManager = false;
+    state.managerSetor = null;
+  }
+}
+
 function listenToEmployees() {
   if (unsubscribeSnapshot) unsubscribeSnapshot();
-  unsubscribeSnapshot = onSnapshot(collection(db, EMPLOYEES_COL), (snap) => {
+  const ref = state.isManager && state.managerSetor
+    ? query(collection(db, EMPLOYEES_COL), where('setor', '==', state.managerSetor))
+    : collection(db, EMPLOYEES_COL);
+  unsubscribeSnapshot = onSnapshot(ref, (snap) => {
     state.employees = snap.docs.map(d => d.data());
     render();
   }, (err) => {
@@ -156,11 +176,11 @@ function render() {
     <div class="header">
       <div>
         <div class="eyebrow">Controle de Saúde Ocupacional</div>
-        <h1 class="display">Painel de ASOs</h1>
-        <div class="sub">${state.employees.length.toLocaleString('pt-BR')} colaboradores no controle</div>
+        <h1 class="display">${state.isManager ? `Painel de Indicadores — ${escapeHtml(state.managerSetor || '')}` : 'Painel de ASOs'}</h1>
+        <div class="sub">${state.employees.length.toLocaleString('pt-BR')} colaborador(es)${state.isManager ? ' · modo consulta (somente leitura)' : ' no controle'}</div>
       </div>
       <div style="display:flex;align-items:center;gap:12px">
-        <button class="btn-add" id="btn-add">${ICONS.plus} Novo colaborador</button>
+        ${state.isManager ? '' : `<button class="btn-add" id="btn-add">${ICONS.plus} Novo colaborador</button>`}
         <button class="logout-btn" id="btn-logout">Sair (${escapeHtml(auth.currentUser ? auth.currentUser.email : '')})</button>
       </div>
     </div>
@@ -245,13 +265,13 @@ function rowHtml(f) {
       <td><span class="badge" style="background:${meta.bg};color:${meta.color}">${meta.label}</span></td>
       <td>
         <div class="row-actions">
-          ${f.ativo ? `
+          ${state.isManager ? '<span style="color:#8A9793;font-size:12px">—</span>' : (f.ativo ? `
             <button class="icon-btn" title="Marcar como agendado" data-action="agendar" data-id="${f.id}">${ICONS.calendar}</button>
             <button class="icon-btn" title="Marcar como realizado" data-action="realizar" data-id="${f.id}">${ICONS.check}</button>
             <button class="icon-btn" title="Editar" data-action="edit" data-id="${f.id}">${ICONS.edit}</button>
             <button class="icon-btn" title="Inativar (desligado)" data-action="inativar" data-id="${f.id}">${ICONS.userx}</button>
-          ` : `<button class="icon-btn" title="Reativar" data-action="reativar" data-id="${f.id}">${ICONS.usercheck}</button>`}
-          <button class="icon-btn" title="Excluir permanentemente" data-action="delete" data-id="${f.id}">${ICONS.trash}</button>
+          ` : `<button class="icon-btn" title="Reativar" data-action="reativar" data-id="${f.id}">${ICONS.usercheck}</button>`)}
+          ${state.isManager ? '' : `<button class="icon-btn" title="Excluir permanentemente" data-action="delete" data-id="${f.id}">${ICONS.trash}</button>`}
         </div>
       </td>
     </tr>`;
@@ -261,7 +281,8 @@ function escapeHtml(s) { return (s || '').toString().replace(/[&<>"']/g, c => ({
 function escapeAttr(s) { return escapeHtml(s); }
 
 function attachEvents() {
-  document.getElementById('btn-add').onclick = () => openModal('add');
+  const btnAdd = document.getElementById('btn-add');
+  if (btnAdd) btnAdd.onclick = () => openModal('add');
   document.getElementById('btn-logout').onclick = () => signOut(auth);
   document.getElementById('input-busca').oninput = (e) => {
     state.busca = e.target.value;
@@ -409,10 +430,13 @@ async function doLogin() {
 onAuthStateChanged(auth, async (user) => {
   if (user) {
     document.getElementById('app').innerHTML = '<div class="loading">Carregando registros…</div>';
-    await seedIfEmpty();
+    await checkManagerStatus();
+    if (!state.isManager) await seedIfEmpty();
     listenToEmployees();
   } else {
     if (unsubscribeSnapshot) { unsubscribeSnapshot(); unsubscribeSnapshot = null; }
+    state.isManager = false;
+    state.managerSetor = null;
     renderLogin();
   }
 });
