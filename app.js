@@ -68,6 +68,8 @@ const FIELD_MAP = {
   ultimadata: 'ultimaData', data: 'ultimaData', dataultimarealizacao: 'ultimaData',
   ultimarealizacao: 'ultimaData', dataexame: 'ultimaData', dataultima: 'ultimaData',
   periodicidade: 'periodicidade', meses: 'periodicidade', periodicidademeses: 'periodicidade',
+  dataafastamento: 'dataAfastamento', afastamento: 'dataAfastamento',
+  datadeafastamento: 'dataAfastamento', datadoafastamento: 'dataAfastamento',
 };
 function normalizeKey(k) {
   return (k ?? '').toString().trim().toLowerCase()
@@ -166,6 +168,35 @@ async function bulkDismiss(ids) {
   for (let i = 0; i < ids.length; i += CHUNK) {
     const batch = writeBatch(db);
     ids.slice(i, i + CHUNK).forEach(id => batch.set(doc(db, EMPLOYEES_COL, id), { ativo: false, afastado: false, dataAgendada: '' }, { merge: true }));
+    await batch.commit();
+  }
+}
+function buildAfastamentosFromRows(rows, employees) {
+  const byMatricula = new Map(), byNome = new Map();
+  employees.forEach(f => {
+    if (f.matricula) byMatricula.set(f.matricula.toString().trim(), f);
+    if (f.nome) byNome.set(f.nome.toString().trim().toLowerCase(), f);
+  });
+  const matched = [], jaAfastados = [], notFound = [];
+  rows.forEach(r => {
+    const matricula = (r.matricula || '').toString().trim();
+    const nome = (r.nome || '').toString().trim();
+    const dataAfastamento = parseDateFlexible(r.dataAfastamento);
+    let f = matricula ? byMatricula.get(matricula) : null;
+    if (!f && nome) f = byNome.get(nome.toLowerCase());
+    if (!f) { notFound.push(matricula || nome || '(linha sem matrícula/nome)'); return; }
+    if (!f.ativo) { notFound.push(`${f.nome} (desligado)`); return; }
+    if (f.afastado) { jaAfastados.push(f.nome); return; }
+    if (!dataAfastamento) { notFound.push(`${f.nome} (sem data de afastamento)`); return; }
+    matched.push({ id: f.id, nome: f.nome, dataAfastamento });
+  });
+  return { matched, jaAfastados, notFound };
+}
+async function bulkAfastar(list) {
+  const CHUNK = 400;
+  for (let i = 0; i < list.length; i += CHUNK) {
+    const batch = writeBatch(db);
+    list.slice(i, i + CHUNK).forEach(item => batch.set(doc(db, EMPLOYEES_COL, item.id), { afastado: true, dataAfastamento: item.dataAfastamento }, { merge: true }));
     await batch.commit();
   }
 }
@@ -401,6 +432,7 @@ function render() {
       <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
         ${state.isManager ? `<button class="btn-secondary" id="btn-export-xlsx">${ICONS.sheet} Baixar indicadores</button>` : `
           <button class="btn-secondary" id="btn-import-new">${ICONS.upload} Importar colaboradores</button>
+          <button class="btn-secondary" id="btn-import-afastados">${ICONS.upload} Importar afastados</button>
           <button class="btn-secondary" id="btn-import-dismiss">${ICONS.upload} Importar desligamentos</button>
           <button class="btn-secondary" id="btn-export-xlsx">${ICONS.sheet} Baixar indicadores</button>
           <button class="btn-add" id="btn-add">${ICONS.plus} Novo colaborador</button>
@@ -516,6 +548,8 @@ function attachEvents() {
   if (btnAdd) btnAdd.onclick = () => openModal('add');
   const btnImportNew = document.getElementById('btn-import-new');
   if (btnImportNew) btnImportNew.onclick = () => openModal('import-new');
+  const btnImportAfastados = document.getElementById('btn-import-afastados');
+  if (btnImportAfastados) btnImportAfastados.onclick = () => openModal('import-afastados');
   const btnImportDismiss = document.getElementById('btn-import-dismiss');
   if (btnImportDismiss) btnImportDismiss.onclick = () => openModal('import-dismiss');
   const btnExport = document.getElementById('btn-export-xlsx');
@@ -565,6 +599,7 @@ const TITLES = {
   afastar: 'Registrar afastamento', retornar: 'Registrar retorno',
   delete: 'Excluir registro permanentemente',
   'import-new': 'Importar novos colaboradores', 'import-dismiss': 'Importar desligamentos em lote',
+  'import-afastados': 'Importar afastados em lote',
 };
 
 function openModal(type, f) {
@@ -659,25 +694,31 @@ function openModal(type, f) {
       <div class="warn-box">${ICONS.alert}<p>Isso removerá <strong>${escapeHtml(f.nome)}</strong> e todo o histórico permanentemente. Se o colaborador foi apenas desligado, prefira "Desligado" para manter o histórico.</p></div>
       <button class="modal-primary" style="background:#C4432E" id="modal-save">Excluir permanentemente</button>`;
     document.getElementById('modal-save').onclick = () => { deleteEmployee(f.id); closeModal(); };
-  } else if (type === 'import-new' || type === 'import-dismiss') {
+  } else if (type === 'import-new' || type === 'import-dismiss' || type === 'import-afastados') {
     const isNew = type === 'import-new';
+    const isAfastados = type === 'import-afastados';
+    const btnLabel = isNew ? 'Importar colaboradores' : isAfastados ? 'Confirmar afastamentos' : 'Confirmar desligamentos';
     body.innerHTML = `
       <p style="font-size:13.5px;color:var(--muted);margin-top:0">
         ${isNew
           ? 'Envie uma planilha (.xlsx ou .csv) com uma linha por colaborador. Colunas aceitas no cabeçalho:'
+          : isAfastados
+          ? 'Envie uma planilha (.xlsx ou .csv) com os colaboradores afastados. Eles serão marcados como <strong>afastados</strong>, com a data do afastamento informada. Colunas aceitas no cabeçalho:'
           : 'Envie uma planilha (.xlsx ou .csv) com os colaboradores desligados. Eles serão marcados como <strong>desligados</strong> (o histórico é mantido — nada é excluído). Coluna aceita no cabeçalho:'}
       </p>
       <div class="mono" style="font-size:12px;background:#F7F9F8;padding:10px;border-radius:6px;margin-bottom:12px;overflow-x:auto">
-        ${isNew ? 'nome | matricula | cargo | departamento | setor | ultimaData | periodicidade' : 'matricula (ou nome, se não tiver matrícula)'}
+        ${isNew ? 'nome | matricula | cargo | departamento | setor | ultimaData | periodicidade' : isAfastados ? 'nome | matricula | dataAfastamento' : 'matricula (ou nome, se não tiver matrícula)'}
       </div>
       <p style="font-size:12.5px;color:var(--muted)">
         ${isNew
           ? '<strong>nome</strong> e <strong>ultimaData</strong> são obrigatórios (data no formato dd/mm/aaaa). <strong>periodicidade</strong> em meses — se vazio, assume 12. Se a matrícula já existir no sistema, o colaborador é atualizado em vez de duplicado.'
+          : isAfastados
+          ? 'Usamos a <strong>matrícula</strong> (ou o <strong>nome</strong>, se não houver matrícula) para encontrar o colaborador certo, e a <strong>dataAfastamento</strong> (dd/mm/aaaa) é obrigatória. Quem já estiver afastado é identificado automaticamente e não é duplicado.'
           : 'Usamos a <strong>matrícula</strong> para encontrar o colaborador certo (mais confiável que o nome). Quem não for encontrado aparece listado abaixo pra você conferir.'}
       </p>
       <input type="file" id="import-file-input" accept=".xlsx,.xls,.csv" class="field-input" style="padding:8px">
       <div id="import-preview" style="font-size:13px;color:var(--muted);min-height:20px;margin:4px 0 14px"></div>
-      <button class="modal-primary" style="background:#1A1A1A" id="modal-save" disabled>${isNew ? 'Importar colaboradores' : 'Confirmar desligamentos'}</button>
+      <button class="modal-primary" style="background:#1A1A1A" id="modal-save" disabled>${btnLabel}</button>
     `;
     const fileInput = document.getElementById('import-file-input');
     const preview = document.getElementById('import-preview');
@@ -697,6 +738,12 @@ function openModal(type, f) {
           ready = valid;
           preview.innerHTML = `${valid.length} colaborador(es) prontos para importar.` +
             (errors.length ? `<br><span style="color:var(--c-vencido)">${errors.length} linha(s) ignorada(s) por falta de nome/data: ${escapeHtml(errors.slice(0, 5).join(', '))}${errors.length > 5 ? '…' : ''}</span>` : '');
+        } else if (isAfastados) {
+          const { matched, jaAfastados, notFound } = buildAfastamentosFromRows(rows, state.employees);
+          ready = matched;
+          preview.innerHTML = `${matched.length} colaborador(es) serão marcados como afastados.` +
+            (jaAfastados.length ? `<br><span style="color:var(--c-afastado)">${jaAfastados.length} já estava(m) afastado(s), nenhuma alteração necessária: ${escapeHtml(jaAfastados.slice(0, 5).join(', '))}${jaAfastados.length > 5 ? '…' : ''}</span>` : '') +
+            (notFound.length ? `<br><span style="color:var(--c-vencido)">${notFound.length} não encontrado(s) ou sem data de afastamento: ${escapeHtml(notFound.slice(0, 5).join(', '))}${notFound.length > 5 ? '…' : ''}</span>` : '');
         } else {
           const { matched, notFound } = buildDismissalsFromRows(rows, state.employees);
           ready = matched;
@@ -715,12 +762,13 @@ function openModal(type, f) {
       saveBtn.textContent = 'Importando…';
       try {
         if (isNew) { await bulkImportNew(ready); showToast(`${ready.length} colaborador(es) importado(s).`); }
+        else if (isAfastados) { await bulkAfastar(ready); showToast(`${ready.length} colaborador(es) marcado(s) como afastados.`); }
         else { await bulkDismiss(ready); showToast(`${ready.length} colaborador(es) marcado(s) como desligados.`); }
         closeModal();
       } catch (e) {
         showToast('Não foi possível concluir a importação: ' + e.message, true);
         saveBtn.disabled = false;
-        saveBtn.textContent = isNew ? 'Importar colaboradores' : 'Confirmar desligamentos';
+        saveBtn.textContent = btnLabel;
       }
     };
   }
