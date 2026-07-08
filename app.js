@@ -235,6 +235,8 @@ async function exportIndicatorsXlsx() {
     { header: 'Nome', key: 'nome', width: 30 },
     { header: 'Matrícula', key: 'matricula', width: 14 },
     { header: 'Cargo', key: 'cargo', width: 22 },
+    { header: 'Departamento', key: 'departamento', width: 22 },
+    { header: 'Setor', key: 'setor', width: 22 },
     { header: 'Última realização', key: 'ultimaData', width: 18 },
     { header: 'Vencimento', key: 'vencimento', width: 16 },
     { header: 'Status', key: 'status', width: 18 },
@@ -252,6 +254,7 @@ async function exportIndicatorsXlsx() {
       const vencimento = f.ultimaData ? addMonths(f.ultimaData, f.periodicidade || 12) : null;
       const row = det.addRow({
         nome: f.nome, matricula: f.matricula || '', cargo: f.cargo || '',
+        departamento: f.departamento || '', setor: f.setor || '',
         ultimaData: fmt(f.ultimaData), vencimento: vencimento ? fmt(vencimento) : '—', status: meta.label,
       });
       const statusCell = row.getCell('status');
