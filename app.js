@@ -1,6 +1,7 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import {
-  getFirestore, collection, doc, getDoc, getDocs, setDoc, deleteDoc, onSnapshot, writeBatch, query, where
+  getFirestore, initializeFirestore, persistentLocalCache, persistentMultipleTabManager,
+  collection, doc, getDoc, getDocs, setDoc, deleteDoc, onSnapshot, writeBatch, query, where
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import {
   getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut
@@ -8,7 +9,16 @@ import {
 import { firebaseConfig } from "./firebase-config.js";
 
 const fbApp = initializeApp(firebaseConfig);
-const db = getFirestore(fbApp);
+// Cache local persistente: com 5 mil colaboradores, evita rebaixar a coleção inteira
+// a cada login (só o que mudou é lido do servidor). Mesmo banco, mesmas coleções.
+let db;
+try {
+  db = initializeFirestore(fbApp, {
+    localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() })
+  });
+} catch (e) {
+  db = getFirestore(fbApp);
+}
 const auth = getAuth(fbApp);
 const EMPLOYEES_COL = 'employees';
 const PAGE_SIZE = 50;
@@ -43,8 +53,48 @@ const STATUS_META = {
   inativo:   { label: 'Desligado',                color: 'var(--c-inativo)',   bg: 'var(--c-inativo-bg)' },
 };
 
-let state = { employees: [], busca: '', departamento: 'Todos', status: 'Todos', page: 1, isManager: false, managerSetor: null, managerDepartamento: null };
+let state = {
+  employees: [], busca: '',
+  filial: 'Todas', departamento: 'Todos', setor: 'Todos', status: 'Todos',
+  page: 1, verPorFilial: false,
+  isManager: false, managerSetor: null, managerDepartamento: null, managerFilial: null,
+};
 const today = new Date(); today.setHours(0,0,0,0);
+
+// ---- Filiais ----
+// A folha do RH traz o nome truncado do estabelecimento. Normalizamos para um rótulo
+// legível e estável — a mesma função é usada na importação, então o valor gravado
+// no Firestore é sempre idêntico para a mesma filial.
+const FILIAL_MAP = {
+  'MATRIZ': 'Matriz',
+  'FILIAL OSASCO': 'Osasco',
+  'FILIAL RIO DE JANEIR': 'Rio de Janeiro',
+  'FILIAL SAO JOSE CAMP': 'São José dos Campos',
+  'FILIAL STA CATARINA': 'Santa Catarina',
+  'FILIAL BRASILIA': 'Brasília',
+  'FILIAL GOIANIA': 'Goiânia',
+  'FILIAL RIO GR DO SUL': 'Rio Grande do Sul',
+  'FILIAL CUIABA': 'Cuiabá',
+  'FILIAL PARANA': 'Paraná',
+};
+const SEM_FILIAL = 'Não informada';
+const FILIAL_LABELS = Object.values(FILIAL_MAP);
+function semAcento(s) { return (s ?? '').toString().normalize('NFD').replace(/[\u0300-\u036f]/g, ''); }
+function normalizeFilial(v) {
+  const raw = (v ?? '').toString().trim();
+  if (!raw) return SEM_FILIAL;
+  const chave = semAcento(raw).toUpperCase();
+  if (FILIAL_MAP[chave]) return FILIAL_MAP[chave];                       // nome cru da planilha
+  const jaNormalizada = FILIAL_LABELS.find(l => semAcento(l).toUpperCase() === chave);
+  if (jaNormalizada) return jaNormalizada;                               // já veio normalizada do banco
+  if (chave === semAcento(SEM_FILIAL).toUpperCase()) return SEM_FILIAL;
+  // filial nova, ainda sem mapeamento: "FILIAL XYZ DE ABC" -> "Xyz de Abc"
+  const menores = new Set(['de', 'da', 'do', 'das', 'dos', 'e']);
+  return raw.replace(/^\s*FILIAL\s+/i, '').toLowerCase().split(/\s+/)
+    .map((p, i) => (i > 0 && menores.has(p)) ? p : p.charAt(0).toLocaleUpperCase('pt-BR') + p.slice(1))
+    .join(' ');
+}
+function filialOf(f) { return f.filial || SEM_FILIAL; }
 
 function addMonths(dateStr, months) {
   const d = new Date(dateStr + 'T00:00:00');
@@ -61,12 +111,22 @@ function daysBetween(a, b) { return Math.round((a - b) / 86400000); }
 // ---- Importação de planilhas (novos colaboradores / desligamentos) ----
 const FIELD_MAP = {
   nome: 'nome', name: 'nome', colaborador: 'nome',
+  nomefunc: 'nome', nomefuncionario: 'nome',                      // BASE NACIONAL
   matricula: 'matricula', re: 'matricula', registro: 'matricula', matriculare: 'matricula',
+  codfun: 'matricula', codigofuncionario: 'matricula',            // BASE NACIONAL
   cargo: 'cargo', funcao: 'cargo', função: 'cargo',
+  descrnivcarg: 'cargo', descrnivelcargo: 'cargo',                // BASE NACIONAL
   departamento: 'departamento', depto: 'departamento',
+  nomedepart: 'departamento', nomedepartamento: 'departamento',   // BASE NACIONAL
   setor: 'setor', area: 'setor',
+  nomesetor: 'setor',                                             // BASE NACIONAL
+  filial: 'filial', unidade: 'filial', estabelecimento: 'filial',
+  nomeestabelecimento: 'filial',                                  // BASE NACIONAL
   ultimadata: 'ultimaData', data: 'ultimaData', dataultimarealizacao: 'ultimaData',
   ultimarealizacao: 'ultimaData', dataexame: 'ultimaData', dataultima: 'ultimaData',
+  dataexamemedico: 'ultimaData',                                  // BASE NACIONAL
+  admissao: 'admissao', dataadmissao: 'admissao',
+  demissao: 'demissao', datademissao: 'demissao', situacao: 'demissao',
   periodicidade: 'periodicidade', meses: 'periodicidade', periodicidademeses: 'periodicidade',
 };
 function normalizeKey(k) {
@@ -116,25 +176,121 @@ function parseSpreadsheet(file) {
     reader.readAsArrayBuffer(file);
   });
 }
+function isAfastadoFlag(v) {
+  return (v ?? '').toString().trim().toUpperCase().startsWith('AFASTAD');
+}
+// Data de exame implausível (erro de digitação do tipo 2926) vira "sem exame",
+// pra não mascarar um vencido como "em dia".
+function sanitizeExamDate(iso) {
+  if (!iso) return '';
+  const ano = Number(iso.slice(0, 4));
+  return (ano < 1980 || ano > today.getFullYear() + 1) ? '' : iso;
+}
 function buildNewEmployeesFromRows(rows) {
   const valid = [], errors = [];
   rows.forEach((r, i) => {
     const nome = (r.nome || '').toString().trim();
-    const ultimaData = parseDateFlexible(r.ultimaData);
-    if (!nome || !ultimaData) { errors.push(nome || `linha ${i + 2}`); return; }
+    const ultimaData = sanitizeExamDate(parseDateFlexible(r.ultimaData));
+    if (!nome) { errors.push(`linha ${i + 2}`); return; }
     const matricula = (r.matricula || '').toString().trim();
+    const afastado = isAfastadoFlag(r.demissao);
     valid.push({
-      id: matricula ? 'mat_' + matricula.replace(/[^\w-]/g, '') : 'novo_' + Date.now() + '_' + i,
+      // id = matrícula (mesma convenção já usada no banco) para nunca duplicar colaborador
+      id: matricula ? matricula.replace(/[^\w-]/g, '') : 'novo_' + Date.now() + '_' + i,
       nome, matricula,
       cargo: (r.cargo || '').toString().trim(),
+      filial: normalizeFilial(r.filial),
       departamento: (r.departamento || '').toString().trim(),
       setor: (r.setor || '').toString().trim(),
+      admissao: parseDateFlexible(r.admissao) || '',
       ultimaData,
       periodicidade: Number(r.periodicidade) || 12,
-      dataAgendada: '', ativo: true,
+      dataAgendada: '', ativo: true, afastado,
     });
   });
   return { valid, errors };
+}
+
+// ---- Sincronização com a base nacional do RH ----
+// Regra de ouro: a planilha manda no cadastro (nome, cargo, filial, departamento, setor,
+// admissão); o painel manda no acompanhamento (agendamentos, exames lançados na mão,
+// periodicidade customizada). Nada é sobrescrito para trás.
+function buildSyncPlan(rows, employees) {
+  const atuais = new Map(employees.map(f => [f.id, f]));
+  const novos = [], atualizados = [], semMudanca = [], revisar = [];
+  const vistos = new Set();
+
+  rows.forEach((r, i) => {
+    const nome = (r.nome || '').toString().trim();
+    const matricula = (r.matricula || '').toString().trim();
+    if (!nome || !matricula) { revisar.push(`linha ${i + 2}: sem matrícula ou nome`); return; }
+    const id = matricula.replace(/[^\w-]/g, '');
+    vistos.add(id);
+
+    const brutaData = parseDateFlexible(r.ultimaData);
+    const dataPlanilha = sanitizeExamDate(brutaData);
+    if (brutaData && !dataPlanilha) revisar.push(`${matricula} — ${nome}: data de exame inválida (${brutaData})`);
+    else if (!brutaData) revisar.push(`${matricula} — ${nome}: sem data de exame`);
+
+    const cadastro = {
+      id, nome, matricula,
+      cargo: (r.cargo || '').toString().trim(),
+      filial: normalizeFilial(r.filial),
+      departamento: (r.departamento || '').toString().trim(),
+      setor: (r.setor || '').toString().trim(),
+      admissao: parseDateFlexible(r.admissao) || '',
+    };
+    const afastadoPlanilha = isAfastadoFlag(r.demissao);
+    const atual = atuais.get(id);
+
+    if (!atual) {
+      novos.push({
+        ...cadastro, ultimaData: dataPlanilha, periodicidade: 12,
+        dataAgendada: '', ativo: true, afastado: afastadoPlanilha,
+        dataAfastamento: '', dataRetorno: '', situacao: afastadoPlanilha ? 'Afastado' : 'Ativo',
+      });
+      return;
+    }
+
+    // exame: vence sempre a data mais recente entre painel e planilha
+    const ultimaData = (dataPlanilha && (!atual.ultimaData || dataPlanilha > atual.ultimaData))
+      ? dataPlanilha : (atual.ultimaData || '');
+    // agendamento só é limpo quando o exame já foi realizado depois dele
+    const dataAgendada = (atual.dataAgendada && ultimaData && ultimaData >= atual.dataAgendada) ? '' : (atual.dataAgendada || '');
+    const patch = { ...cadastro, ultimaData, dataAgendada, ativo: true };
+
+    const mudou = Object.keys(patch).some(k => (atual[k] ?? '') !== (patch[k] ?? ''))
+      || (afastadoPlanilha !== !!atual.afastado);
+    if (mudou) atualizados.push({ patch, afastadoPlanilha, antes: atual });
+    else semMudanca.push(id);
+  });
+
+  const ausentes = employees.filter(f => f.ativo && !vistos.has(f.id));
+  return { novos, atualizados, semMudanca, ausentes, revisar };
+}
+
+async function applySync(plan, opts) {
+  const writes = [];
+  plan.novos.forEach(emp => writes.push([emp.id, emp]));
+  plan.atualizados.forEach(({ patch, afastadoPlanilha }) => {
+    const dados = { ...patch };
+    if (opts.sincronizarAfastamentos) {
+      dados.afastado = afastadoPlanilha;
+      dados.situacao = afastadoPlanilha ? 'Afastado' : 'Ativo';
+      if (!afastadoPlanilha) dados.dataRetorno = dados.dataRetorno || '';
+    }
+    writes.push([patch.id, dados]);
+  });
+  if (opts.desligarAusentes) {
+    plan.ausentes.forEach(f => writes.push([f.id, { ativo: false, afastado: false, dataAgendada: '', situacao: 'Desligado' }]));
+  }
+  const CHUNK = 400; // limite do Firestore é 500 operações por lote
+  for (let i = 0; i < writes.length; i += CHUNK) {
+    const batch = writeBatch(db);
+    writes.slice(i, i + CHUNK).forEach(([id, data]) => batch.set(doc(db, EMPLOYEES_COL, id), data, { merge: true }));
+    await batch.commit();
+  }
+  return writes.length;
 }
 function buildDismissalsFromRows(rows, employees) {
   const byMatricula = new Map(), byNome = new Map();
@@ -183,10 +339,10 @@ const STATUS_EXPORT_COLORS = {
 };
 async function exportIndicatorsXlsx() {
   if (!window.ExcelJS) { showToast('Biblioteca de planilha não carregou. Recarregue a página e tente de novo.', true); return; }
-  const enriched = state.employees.map(f => ({ ...f, status: getStatus(f) }));
-  const ativos = state.employees.filter(f => f.ativo).length;
+  const enriched = getScope();                       // respeita filial/departamento/setor/busca
+  const ativos = enriched.filter(f => f.ativo).length;
   const counts = enriched.reduce((acc, f) => { acc[f.status] = (acc[f.status] || 0) + 1; return acc; }, {});
-  const setorLabel = !state.isManager ? 'Todos os setores' : ((state.managerSetor === '*' || state.managerDepartamento === '*') ? 'Todos os setores' : (state.managerDepartamento || state.managerSetor || 'Painel'));
+  const setorLabel = scopeLabel();
 
   const wb = new window.ExcelJS.Workbook();
   wb.creator = 'Painel de ASOs';
@@ -229,12 +385,43 @@ async function exportIndicatorsXlsx() {
     r.eachCell(c => { c.border = { bottom: { style: 'thin', color: { argb: 'FFDCDCDC' } } }; });
   });
 
-  // ---- Aba 2: Colaboradores ----
+  // ---- Aba 2: Por filial ----
+  const porFilial = wb.addWorksheet('Por filial');
+  porFilial.columns = [
+    { header: 'Filial', key: 'filial', width: 24 },
+    { header: 'Ativos', key: 'ativos', width: 10 },
+    { header: 'Em dia', key: 'em_dia', width: 10 },
+    { header: 'Vence 90', key: 'vence90', width: 11 },
+    { header: 'Vence 30', key: 'vence30', width: 11 },
+    { header: 'Vencidos', key: 'vencido', width: 11 },
+    { header: 'Agendados', key: 'agendado', width: 12 },
+    { header: 'Sem exame', key: 'sem_exame', width: 12 },
+    { header: 'Afastados', key: 'afastado', width: 11 },
+    { header: 'Desligados', key: 'inativo', width: 12 },
+    { header: '% em dia', key: 'pct', width: 11 },
+  ];
+  porFilial.getRow(1).eachCell(c => {
+    c.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+    c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1A1A1A' } };
+  });
+  resumoPorFilial(enriched).forEach(l => {
+    const row = porFilial.addRow({
+      filial: l.filial, ativos: l.ativos, em_dia: l.em_dia, vence90: l.vence90, vence30: l.vence30,
+      vencido: l.vencido, agendado: l.agendado, sem_exame: l.sem_exame, afastado: l.afastado,
+      inativo: l.inativo, pct: l.ativos ? Math.round((l.em_dia / l.ativos) * 100) / 100 : 0,
+    });
+    row.getCell('pct').numFmt = '0%';
+    row.getCell('vencido').font = { bold: true, color: { argb: STATUS_EXPORT_COLORS.vencido.fg } };
+    row.getCell('em_dia').font = { bold: true, color: { argb: STATUS_EXPORT_COLORS.em_dia.fg } };
+  });
+
+  // ---- Aba 3: Colaboradores ----
   const det = wb.addWorksheet('Colaboradores');
   det.columns = [
     { header: 'Nome', key: 'nome', width: 30 },
     { header: 'Matrícula', key: 'matricula', width: 14 },
     { header: 'Cargo', key: 'cargo', width: 22 },
+    { header: 'Filial', key: 'filial', width: 20 },
     { header: 'Departamento', key: 'departamento', width: 22 },
     { header: 'Setor', key: 'setor', width: 22 },
     { header: 'Última realização', key: 'ultimaData', width: 18 },
@@ -254,7 +441,7 @@ async function exportIndicatorsXlsx() {
       const vencimento = f.ultimaData ? addMonths(f.ultimaData, f.periodicidade || 12) : null;
       const row = det.addRow({
         nome: f.nome, matricula: f.matricula || '', cargo: f.cargo || '',
-        departamento: f.departamento || '', setor: f.setor || '',
+        filial: filialOf(f), departamento: f.departamento || '', setor: f.setor || '',
         ultimaData: fmt(f.ultimaData), vencimento: vencimento ? fmt(vencimento) : '—', status: meta.label,
       });
       const statusCell = row.getCell('status');
@@ -288,6 +475,46 @@ function getStatus(f) {
   return 'em_dia';
 }
 
+// ---- Escopo: tudo que não é o filtro de status ----
+// Os cards são calculados sobre o ESCOPO, então mudar de filial ou de departamento
+// recalcula os números na hora. O filtro de status só afeta a tabela.
+function getScope() {
+  const q = state.busca.trim().toLowerCase();
+  return state.employees
+    .map(f => ({ ...f, status: getStatus(f) }))
+    .filter(f => {
+      if (q && !f.nome.toLowerCase().includes(q) && !(f.matricula || '').toString().includes(state.busca.trim())) return false;
+      if (state.filial !== 'Todas' && filialOf(f) !== state.filial) return false;
+      if (state.departamento !== 'Todos' && f.departamento !== state.departamento) return false;
+      if (state.setor !== 'Todos' && f.setor !== state.setor) return false;
+      return true;
+    });
+}
+function scopeLabel() {
+  if (state.setor !== 'Todos') return state.setor;
+  if (state.departamento !== 'Todos') return state.departamento;
+  if (state.filial !== 'Todas') return 'Filial ' + state.filial;
+  if (state.isManager) {
+    if (state.managerFilial && state.managerFilial !== '*') return 'Filial ' + state.managerFilial;
+    if (state.managerDepartamento && state.managerDepartamento !== '*') return state.managerDepartamento;
+    if (state.managerSetor && state.managerSetor !== '*') return state.managerSetor;
+  }
+  return 'Nacional';
+}
+function countBy(list) {
+  return list.reduce((acc, f) => { acc[f.status] = (acc[f.status] || 0) + 1; return acc; }, {});
+}
+function resumoPorFilial(enriched) {
+  const mapa = new Map();
+  enriched.forEach(f => {
+    const k = filialOf(f);
+    if (!mapa.has(k)) mapa.set(k, { filial: k, total: 0, ativos: 0, em_dia: 0, vence90: 0, vence30: 0, vencido: 0, agendado: 0, sem_exame: 0, afastado: 0, inativo: 0 });
+    const l = mapa.get(k);
+    l.total++; if (f.ativo) l.ativos++; l[f.status]++;
+  });
+  return Array.from(mapa.values()).sort((a, b) => b.vencido - a.vencido || b.ativos - a.ativos);
+}
+
 async function seedIfEmpty() {
   let snap;
   try { snap = await getDocs(collection(db, EMPLOYEES_COL)); }
@@ -311,24 +538,33 @@ async function checkManagerStatus() {
       state.isManager = true;
       state.managerSetor = data.setor || null;
       state.managerDepartamento = data.departamento || null;
+      state.managerFilial = data.filial ? normalizeFilial(data.filial) : null;
+      if (data.filial === '*') state.managerFilial = '*';
+      // gestor de filial já entra com o painel travado na filial dele
+      if (state.managerFilial && state.managerFilial !== '*') state.filial = state.managerFilial;
     } else {
       state.isManager = false;
       state.managerSetor = null;
       state.managerDepartamento = null;
+      state.managerFilial = null;
     }
   } catch (e) {
     state.isManager = false;
     state.managerSetor = null;
     state.managerDepartamento = null;
+    state.managerFilial = null;
   }
 }
 
 function listenToEmployees() {
   if (unsubscribeSnapshot) unsubscribeSnapshot();
-  const isAllAccess = !state.isManager || state.managerSetor === '*' || state.managerDepartamento === '*';
+  const isAllAccess = !state.isManager || state.managerSetor === '*' || state.managerDepartamento === '*' || state.managerFilial === '*';
   let ref;
   if (isAllAccess) {
     ref = collection(db, EMPLOYEES_COL);
+  } else if (state.managerFilial) {
+    // gestor escopado por filial (ex: "Rio de Janeiro") — vê todos os departamentos dela
+    ref = query(collection(db, EMPLOYEES_COL), where('filial', '==', state.managerFilial));
   } else if (state.managerDepartamento) {
     // gestor escopado por departamento (ex: "V.TAL") — vê todos os setores desse departamento
     ref = query(collection(db, EMPLOYEES_COL), where('departamento', '==', state.managerDepartamento));
@@ -379,13 +615,7 @@ function deleteEmployee(id) {
 }
 
 function getFiltered() {
-  const enriched = state.employees.map(f => ({ ...f, status: getStatus(f) }));
-  return enriched.filter(f => {
-    if (state.busca) {
-      const q = state.busca.toLowerCase();
-      if (!f.nome.toLowerCase().includes(q) && !(f.matricula || '').includes(state.busca)) return false;
-    }
-    if (state.departamento !== 'Todos' && f.departamento !== state.departamento) return false;
+  return getScope().filter(f => {
     if (state.status !== 'Todos' && f.status !== state.status) return false;
     return true;
   }).sort((a, b) => {
@@ -397,11 +627,22 @@ function getFiltered() {
 
 function render() {
   const app = document.getElementById('app');
-  const enrichedAll = state.employees.map(f => ({ ...f, status: getStatus(f) }));
-  const ativos = state.employees.filter(f => f.ativo).length;
-  const counts = enrichedAll.reduce((acc, f) => { acc[f.status] = (acc[f.status] || 0) + 1; return acc; }, {});
-  const departamentos = ['Todos', ...Array.from(new Set(state.employees.map(f => f.departamento).filter(Boolean))).sort()];
+  const scope = getScope();                       // cards e indicadores olham só o escopo
+  const ativos = scope.filter(f => f.ativo).length;
+  const counts = countBy(scope);
   const filtered = getFiltered();
+
+  // listas em cascata: a filial define os departamentos, o departamento define os setores
+  const podeTrocarFilial = !state.isManager || state.managerFilial === '*' || !state.managerFilial;
+  const filiais = ['Todas', ...Array.from(new Set(state.employees.map(filialOf))).sort((a, b) => a.localeCompare(b, 'pt-BR'))];
+  const naFilial = state.employees.filter(f => state.filial === 'Todas' || filialOf(f) === state.filial);
+  const departamentos = ['Todos', ...Array.from(new Set(naFilial.map(f => f.departamento).filter(Boolean))).sort((a, b) => a.localeCompare(b, 'pt-BR'))];
+  const noDepto = naFilial.filter(f => state.departamento === 'Todos' || f.departamento === state.departamento);
+  const setores = ['Todos', ...Array.from(new Set(noDepto.map(f => f.setor).filter(Boolean))).sort((a, b) => a.localeCompare(b, 'pt-BR'))];
+  if (!departamentos.includes(state.departamento)) state.departamento = 'Todos';
+  if (!setores.includes(state.setor)) state.setor = 'Todos';
+  const temFiltro = state.filial !== 'Todas' || state.departamento !== 'Todos' || state.setor !== 'Todos' || state.status !== 'Todos' || state.busca;
+  const pctEmDia = ativos ? Math.round(((counts.em_dia || 0) / ativos) * 100) : 0;
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   if (state.page > totalPages) state.page = totalPages;
@@ -411,11 +652,15 @@ function render() {
     <div class="header">
       <div>
         <div class="eyebrow">Controle de Saúde Ocupacional</div>
-        <h1 class="display">${state.isManager ? `Painel de Indicadores — ${(state.managerSetor === '*' || state.managerDepartamento === '*') ? 'Todos os setores' : escapeHtml(state.managerDepartamento || state.managerSetor || '')}` : 'Painel de ASOs'}</h1>
-        <div class="sub">${state.employees.length.toLocaleString('pt-BR')} colaborador(es)${state.isManager ? ' · modo consulta (somente leitura)' : ' no controle'}</div>
+        <h1 class="display">${state.isManager ? `Painel de Indicadores — ${escapeHtml(scopeLabel())}` : 'Painel de ASOs'}</h1>
+        <div class="sub">
+          ${scope.length.toLocaleString('pt-BR')} de ${state.employees.length.toLocaleString('pt-BR')} colaborador(es) ·
+          <strong>${escapeHtml(scopeLabel())}</strong>${state.isManager ? ' · modo consulta (somente leitura)' : ''}
+        </div>
       </div>
       <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
         ${state.isManager ? `<button class="btn-secondary" id="btn-export-xlsx">${ICONS.sheet} Baixar indicadores</button>` : `
+          <button class="btn-secondary" id="btn-import-sync">${ICONS.upload} Sincronizar base nacional</button>
           <button class="btn-secondary" id="btn-import-new">${ICONS.upload} Importar colaboradores</button>
           <button class="btn-secondary" id="btn-import-dismiss">${ICONS.upload} Importar desligamentos</button>
           <button class="btn-secondary" id="btn-export-xlsx">${ICONS.sheet} Baixar indicadores</button>
@@ -426,7 +671,7 @@ function render() {
     </div>
 
     <div class="counters">
-      ${countCard('Total ativos', ativos, 'var(--pine)', null)}
+      ${countCard(`Total ativos${ativos ? ` · ${pctEmDia}% em dia` : ''}`, ativos, 'var(--pine)', null)}
       ${countCard('Em dia', counts.em_dia || 0, 'var(--c-emdia)', 'em_dia')}
       ${countCard('Vence em 90 dias', counts.vence90 || 0, 'var(--c-vence90)', 'vence90')}
       ${countCard('Vence em 30 dias', counts.vence30 || 0, 'var(--c-vence30)', 'vence30')}
@@ -440,8 +685,18 @@ function render() {
     <div class="toolbar">
       <div class="search-wrap">${ICONS.search}<input id="input-busca" placeholder="Buscar por nome ou matrícula" value="${escapeAttr(state.busca)}"></div>
       <div class="select-wrap">
+        <select id="select-filial" ${podeTrocarFilial ? '' : 'disabled title="Seu acesso é restrito a esta filial"'}>
+          ${filiais.map(f => `<option value="${escapeAttr(f)}" ${f === state.filial ? 'selected' : ''}>${f === 'Todas' ? 'Todas as filiais' : escapeHtml(f)}</option>`).join('')}
+        </select>${ICONS.chevron}
+      </div>
+      <div class="select-wrap">
         <select id="select-depto">
           ${departamentos.map(d => `<option value="${escapeAttr(d)}" ${d === state.departamento ? 'selected' : ''}>${d === 'Todos' ? 'Todos os departamentos' : d}</option>`).join('')}
+        </select>${ICONS.chevron}
+      </div>
+      <div class="select-wrap">
+        <select id="select-setor">
+          ${setores.map(s => `<option value="${escapeAttr(s)}" ${s === state.setor ? 'selected' : ''}>${s === 'Todos' ? 'Todos os setores' : escapeHtml(s)}</option>`).join('')}
         </select>${ICONS.chevron}
       </div>
       <div class="select-wrap">
@@ -450,8 +705,11 @@ function render() {
           ${Object.entries(STATUS_META).map(([k, v]) => `<option value="${k}" ${state.status === k ? 'selected' : ''}>${v.label}</option>`).join('')}
         </select>${ICONS.chevron}
       </div>
-      ${(state.departamento !== 'Todos' || state.status !== 'Todos' || state.busca) ? `<button class="clear-link" id="btn-clear">Limpar filtros</button>` : ''}
+      <button class="clear-link" id="btn-por-filial">${state.verPorFilial ? 'Ocultar visão por filial' : 'Ver por filial'}</button>
+      ${temFiltro ? `<button class="clear-link" id="btn-clear">Limpar filtros</button>` : ''}
     </div>
+
+    ${state.verPorFilial ? painelPorFilialHtml(getScope()) : ''}
 
     <div class="result-count">${filtered.length.toLocaleString('pt-BR')} registro(s) encontrado(s)</div>
 
@@ -459,10 +717,10 @@ function render() {
       <div class="table-card">
         <table>
           <thead><tr>
-            <th>Colaborador</th><th>Departamento</th><th>Última realização</th><th>Vencimento</th><th>Status</th><th>Ações</th>
+            <th class="col-filial">Filial</th><th>Colaborador</th><th>Departamento</th><th>Última realização</th><th>Vencimento</th><th>Status</th><th>Ações</th>
           </tr></thead>
           <tbody>
-            ${pageItems.length === 0 ? `<tr class="empty-row"><td colspan="6">Nenhum registro encontrado com os filtros atuais.</td></tr>` : pageItems.map(rowHtml).join('')}
+            ${pageItems.length === 0 ? `<tr class="empty-row"><td colspan="7">Nenhum registro encontrado com os filtros atuais.</td></tr>` : pageItems.map(rowHtml).join('')}
           </tbody>
         </table>
         <div class="pagination">
@@ -480,6 +738,41 @@ function render() {
   attachEvents();
 }
 
+function painelPorFilialHtml(enriched) {
+  const linhas = resumoPorFilial(enriched);
+  if (!linhas.length) return '';
+  return `
+    <div class="filial-panel">
+      <div class="filial-panel-head">
+        <strong>Visão por filial</strong>
+        <span>ordenado por vencidos · clique numa linha para filtrar</span>
+      </div>
+      <table class="filial-table">
+        <thead><tr>
+          <th>Filial</th><th>Ativos</th><th>Vencidos</th><th>Vence 30</th><th>Vence 90</th><th>Em dia</th><th>Afastados</th><th>Cobertura</th>
+        </tr></thead>
+        <tbody>
+          ${linhas.map(l => {
+            const pct = l.ativos ? Math.round((l.em_dia / l.ativos) * 100) : 0;
+            return `<tr class="filial-row" data-filial="${escapeAttr(l.filial)}">
+              <td><strong>${escapeHtml(l.filial)}</strong></td>
+              <td class="mono">${l.ativos.toLocaleString('pt-BR')}</td>
+              <td class="mono" style="color:var(--c-vencido);font-weight:600">${l.vencido.toLocaleString('pt-BR')}</td>
+              <td class="mono" style="color:var(--c-vence30)">${l.vence30.toLocaleString('pt-BR')}</td>
+              <td class="mono" style="color:var(--c-vence90)">${l.vence90.toLocaleString('pt-BR')}</td>
+              <td class="mono" style="color:var(--c-emdia)">${l.em_dia.toLocaleString('pt-BR')}</td>
+              <td class="mono" style="color:var(--c-afastado)">${l.afastado.toLocaleString('pt-BR')}</td>
+              <td>
+                <div class="bar"><div class="bar-fill" style="width:${pct}%"></div></div>
+                <span class="bar-lbl mono">${pct}%</span>
+              </td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>`;
+}
+
 function countCard(label, value, color, statusKey) {
   const active = statusKey && state.status === statusKey;
   return `<div class="count-card ${active ? 'active' : ''}" style="border-top-color:${color}" data-status="${statusKey || ''}">
@@ -493,6 +786,7 @@ function rowHtml(f) {
   const vencimento = f.ultimaData ? addMonths(f.ultimaData, f.periodicidade || 12) : null;
   return `
     <tr style="border-left-color:${meta.color}">
+      <td class="col-filial"><span class="filial-tag" data-filial="${escapeAttr(filialOf(f))}">${escapeHtml(filialOf(f))}</span></td>
       <td class="name-cell">
         <div class="name">${escapeHtml(f.nome)}</div>
         <div class="meta mono">Matr. ${escapeHtml(f.matricula || '—')} · ${escapeHtml(f.cargo || '')}</div>
@@ -532,6 +826,8 @@ function attachEvents() {
   if (btnAdd) btnAdd.onclick = () => openModal('add');
   const btnImportNew = document.getElementById('btn-import-new');
   if (btnImportNew) btnImportNew.onclick = () => openModal('import-new');
+  const btnSync = document.getElementById('btn-import-sync');
+  if (btnSync) btnSync.onclick = () => openModal('import-sync');
   const btnImportDismiss = document.getElementById('btn-import-dismiss');
   if (btnImportDismiss) btnImportDismiss.onclick = () => openModal('import-dismiss');
   const btnExport = document.getElementById('btn-export-xlsx');
@@ -546,10 +842,33 @@ function attachEvents() {
     input.focus();
     input.setSelectionRange(cursorPos, cursorPos);
   };
-  document.getElementById('select-depto').onchange = (e) => { state.departamento = e.target.value; state.page = 1; render(); };
+  const selFilial = document.getElementById('select-filial');
+  if (selFilial) selFilial.onchange = (e) => {
+    state.filial = e.target.value;
+    state.departamento = 'Todos'; state.setor = 'Todos'; // recomeça a cascata
+    state.page = 1; render();
+  };
+  document.getElementById('select-depto').onchange = (e) => { state.departamento = e.target.value; state.setor = 'Todos'; state.page = 1; render(); };
+  document.getElementById('select-setor').onchange = (e) => { state.setor = e.target.value; state.page = 1; render(); };
   document.getElementById('select-status').onchange = (e) => { state.status = e.target.value; state.page = 1; render(); };
+  const btnPorFilial = document.getElementById('btn-por-filial');
+  if (btnPorFilial) btnPorFilial.onclick = () => { state.verPorFilial = !state.verPorFilial; render(); };
   const clearBtn = document.getElementById('btn-clear');
-  if (clearBtn) clearBtn.onclick = () => { state.busca = ''; state.departamento = 'Todos'; state.status = 'Todos'; state.page = 1; render(); };
+  if (clearBtn) clearBtn.onclick = () => {
+    state.busca = ''; state.status = 'Todos'; state.departamento = 'Todos'; state.setor = 'Todos';
+    if (!state.isManager || state.managerFilial === '*' || !state.managerFilial) state.filial = 'Todas';
+    state.page = 1; render();
+  };
+
+  document.querySelectorAll('.filial-row, .filial-tag').forEach(el => {
+    el.onclick = (ev) => {
+      if (!(!state.isManager || state.managerFilial === '*' || !state.managerFilial)) return;
+      ev.stopPropagation();
+      state.filial = el.dataset.filial;
+      state.departamento = 'Todos'; state.setor = 'Todos'; state.page = 1;
+      render();
+    };
+  });
 
   document.querySelectorAll('.count-card').forEach(el => {
     el.onclick = () => { state.status = el.dataset.status || 'Todos'; state.page = 1; render(); };
@@ -581,6 +900,7 @@ const TITLES = {
   afastar: 'Registrar afastamento', retornar: 'Registrar retorno',
   delete: 'Excluir registro permanentemente',
   'import-new': 'Importar novos colaboradores', 'import-dismiss': 'Importar desligamentos em lote',
+  'import-sync': 'Sincronizar base nacional',
 };
 
 function openModal(type, f) {
@@ -598,11 +918,15 @@ function openModal(type, f) {
 
   const body = document.getElementById('modal-body');
   if (isForm) {
-    const d = f || { nome: '', matricula: '', cargo: '', departamento: '', setor: '', ultimaData: '', periodicidade: 12 };
+    const d = f || { nome: '', matricula: '', cargo: '', filial: '', departamento: '', setor: '', ultimaData: '', periodicidade: 12 };
+    const filiaisConhecidas = Array.from(new Set([...Object.values(FILIAL_MAP), ...state.employees.map(filialOf)])).sort((a, b) => a.localeCompare(b, 'pt-BR'));
     body.innerHTML = `
       <label class="field-label">Nome completo</label><input class="field-input" id="f-nome" value="${escapeAttr(d.nome)}">
       <label class="field-label">Matrícula</label><input class="field-input" id="f-matricula" value="${escapeAttr(d.matricula)}">
       <label class="field-label">Cargo</label><input class="field-input" id="f-cargo" value="${escapeAttr(d.cargo)}">
+      <label class="field-label">Filial</label>
+      <input class="field-input" id="f-filial" list="lista-filiais" placeholder="Ex.: Osasco" value="${escapeAttr(d.filial || '')}">
+      <datalist id="lista-filiais">${filiaisConhecidas.map(x => `<option value="${escapeAttr(x)}"></option>`).join('')}</datalist>
       <label class="field-label">Departamento</label><input class="field-input" id="f-departamento" value="${escapeAttr(d.departamento)}">
       <label class="field-label">Setor</label><input class="field-input" id="f-setor" value="${escapeAttr(d.setor)}">
       <label class="field-label">Data da última realização</label><input type="date" class="field-input" id="f-ultimaData" value="${d.ultimaData || ''}">
@@ -614,6 +938,7 @@ function openModal(type, f) {
         nome: document.getElementById('f-nome').value.trim(),
         matricula: document.getElementById('f-matricula').value.trim(),
         cargo: document.getElementById('f-cargo').value.trim(),
+        filial: document.getElementById('f-filial').value.trim() || SEM_FILIAL,
         departamento: document.getElementById('f-departamento').value.trim(),
         setor: document.getElementById('f-setor').value.trim(),
         ultimaData: document.getElementById('f-ultimaData').value,
@@ -675,6 +1000,73 @@ function openModal(type, f) {
       <div class="warn-box">${ICONS.alert}<p>Isso removerá <strong>${escapeHtml(f.nome)}</strong> e todo o histórico permanentemente. Se o colaborador foi apenas desligado, prefira "Desligado" para manter o histórico.</p></div>
       <button class="modal-primary" style="background:#C4432E" id="modal-save">Excluir permanentemente</button>`;
     document.getElementById('modal-save').onclick = () => { deleteEmployee(f.id); closeModal(); };
+  } else if (type === 'import-sync') {
+    body.innerHTML = `
+      <p style="font-size:13.5px;color:var(--muted);margin-top:0">
+        Envie a planilha nacional do RH (a mesma exportação de sempre). O painel compara com o que já está no banco e mostra o impacto <strong>antes</strong> de gravar qualquer coisa.
+      </p>
+      <div class="mono" style="font-size:11.5px;background:#F7F9F8;padding:10px;border-radius:6px;margin-bottom:12px;overflow-x:auto">
+        Nome_estabelecimento | Nome_depart | Nome_setor | DATA_EXAME_MEDICO | COD.FUN | NOME FUNC. | ADMISSAO | DEMISSAO | DESCR.NIV.CARG.
+      </div>
+      <p style="font-size:12.5px;color:var(--muted);margin-top:0">
+        A planilha atualiza o <strong>cadastro</strong> (nome, cargo, filial, departamento, setor, admissão). O painel mantém o <strong>acompanhamento</strong>: agendamentos e exames lançados aqui não voltam atrás — se a data do painel for mais recente que a da planilha, ela é preservada.
+      </p>
+      <input type="file" id="import-file-input" accept=".xlsx,.xls,.csv" class="field-input" style="padding:8px">
+      <div id="import-preview" style="font-size:13px;color:var(--muted);min-height:20px;margin:4px 0 10px"></div>
+      <label style="display:flex;gap:8px;align-items:flex-start;font-size:13px;margin-bottom:8px">
+        <input type="checkbox" id="opt-afast" checked style="margin-top:2px">
+        <span>Atualizar afastamentos pela coluna DEMISSAO (quem saiu de "AFASTADO" volta a ativo)</span>
+      </label>
+      <label style="display:flex;gap:8px;align-items:flex-start;font-size:13px;margin-bottom:14px">
+        <input type="checkbox" id="opt-ausentes" style="margin-top:2px">
+        <span>Marcar como <strong>desligado</strong> quem está no painel e não aparece na planilha <em id="ausentes-hint"></em></span>
+      </label>
+      <button class="modal-primary" style="background:#1A1A1A" id="modal-save" disabled>Sincronizar</button>
+    `;
+    const fileInput = document.getElementById('import-file-input');
+    const preview = document.getElementById('import-preview');
+    const saveBtn = document.getElementById('modal-save');
+    let plan = null;
+
+    fileInput.onchange = async () => {
+      const file = fileInput.files[0];
+      if (!file) return;
+      preview.textContent = 'Lendo planilha…';
+      saveBtn.disabled = true; plan = null;
+      try {
+        const rows = await parseSpreadsheet(file);
+        plan = buildSyncPlan(rows, state.employees);
+        document.getElementById('ausentes-hint').textContent = `(${plan.ausentes.length})`;
+        preview.innerHTML = `
+          <div style="background:#F7F9F8;border-radius:8px;padding:10px;line-height:1.7">
+            <strong>${rows.length.toLocaleString('pt-BR')}</strong> linha(s) lidas<br>
+            <span style="color:var(--c-emdia)">+ ${plan.novos.length.toLocaleString('pt-BR')} novo(s) colaborador(es)</span><br>
+            <span style="color:var(--c-agendado)">↻ ${plan.atualizados.length.toLocaleString('pt-BR')} atualizado(s)</span><br>
+            <span style="color:var(--muted)">= ${plan.semMudanca.length.toLocaleString('pt-BR')} sem alteração</span><br>
+            <span style="color:var(--c-afastado)">⚠ ${plan.ausentes.length.toLocaleString('pt-BR')} no painel e fora da planilha</span>
+            ${plan.revisar.length ? `<br><span style="color:var(--c-vencido)">${plan.revisar.length} linha(s) para revisar: ${escapeHtml(plan.revisar.slice(0, 3).join(' · '))}${plan.revisar.length > 3 ? '…' : ''}</span>` : ''}
+          </div>`;
+        saveBtn.disabled = (plan.novos.length + plan.atualizados.length) === 0;
+      } catch (e) {
+        preview.innerHTML = `<span style="color:var(--c-vencido)">${escapeHtml(e.message)}</span>`;
+      }
+    };
+
+    saveBtn.onclick = async () => {
+      if (!plan) return;
+      saveBtn.disabled = true; saveBtn.textContent = 'Sincronizando…';
+      try {
+        const total = await applySync(plan, {
+          sincronizarAfastamentos: document.getElementById('opt-afast').checked,
+          desligarAusentes: document.getElementById('opt-ausentes').checked,
+        });
+        closeModal();
+        showToast(`Base sincronizada — ${total.toLocaleString('pt-BR')} registro(s) gravado(s).`);
+      } catch (e) {
+        showToast('Não foi possível sincronizar: ' + e.message, true);
+        saveBtn.disabled = false; saveBtn.textContent = 'Sincronizar';
+      }
+    };
   } else if (type === 'import-new' || type === 'import-dismiss') {
     const isNew = type === 'import-new';
     body.innerHTML = `
@@ -684,11 +1076,11 @@ function openModal(type, f) {
           : 'Envie uma planilha (.xlsx ou .csv) com os colaboradores desligados. Eles serão marcados como <strong>desligados</strong> (o histórico é mantido — nada é excluído). Coluna aceita no cabeçalho:'}
       </p>
       <div class="mono" style="font-size:12px;background:#F7F9F8;padding:10px;border-radius:6px;margin-bottom:12px;overflow-x:auto">
-        ${isNew ? 'nome | matricula | cargo | departamento | setor | ultimaData | periodicidade' : 'matricula (ou nome, se não tiver matrícula)'}
+        ${isNew ? 'nome | matricula | cargo | filial | departamento | setor | ultimaData | periodicidade' : 'matricula (ou nome, se não tiver matrícula)'}
       </div>
       <p style="font-size:12.5px;color:var(--muted)">
         ${isNew
-          ? '<strong>nome</strong> e <strong>ultimaData</strong> são obrigatórios (data no formato dd/mm/aaaa). <strong>periodicidade</strong> em meses — se vazio, assume 12. Se a matrícula já existir no sistema, o colaborador é atualizado em vez de duplicado.'
+          ? '<strong>nome</strong> é obrigatório e <strong>matricula</strong> é o que evita duplicidade (data no formato dd/mm/aaaa). Sem <strong>ultimaData</strong> o colaborador entra como "Sem exame". <strong>periodicidade</strong> em meses — se vazio, assume 12. Se a matrícula já existir, o colaborador é atualizado em vez de duplicado. Para a planilha completa do RH, use "Sincronizar base nacional".'
           : 'Usamos a <strong>matrícula</strong> para encontrar o colaborador certo (mais confiável que o nome). Quem não for encontrado aparece listado abaixo pra você conferir.'}
       </p>
       <input type="file" id="import-file-input" accept=".xlsx,.xls,.csv" class="field-input" style="padding:8px">
@@ -712,7 +1104,7 @@ function openModal(type, f) {
           const { valid, errors } = buildNewEmployeesFromRows(rows);
           ready = valid;
           preview.innerHTML = `${valid.length} colaborador(es) prontos para importar.` +
-            (errors.length ? `<br><span style="color:var(--c-vencido)">${errors.length} linha(s) ignorada(s) por falta de nome/data: ${escapeHtml(errors.slice(0, 5).join(', '))}${errors.length > 5 ? '…' : ''}</span>` : '');
+            (errors.length ? `<br><span style="color:var(--c-vencido)">${errors.length} linha(s) ignorada(s) por falta de nome: ${escapeHtml(errors.slice(0, 5).join(', '))}${errors.length > 5 ? '…' : ''}</span>` : '');
         } else {
           const { matched, notFound } = buildDismissalsFromRows(rows, state.employees);
           ready = matched;
