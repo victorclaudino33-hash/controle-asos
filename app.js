@@ -515,6 +515,19 @@ function resumoPorFilial(enriched) {
   return Array.from(mapa.values()).sort((a, b) => b.vencido - a.vencido || b.ativos - a.ativos);
 }
 
+// Converte os registros do data.json no mesmo formato de "linha de planilha",
+// para passar pelo mesmo plano de sincronização (com prévia e preservação do painel).
+async function loadSeedRows() {
+  const res = await fetch('data.json', { cache: 'no-store' });
+  if (!res.ok) throw new Error('Não encontrei o data.json na pasta do painel.');
+  const seed = await res.json();
+  return seed.map(r => ({
+    nome: r.nome, matricula: r.matricula, cargo: r.cargo, filial: r.filial,
+    departamento: r.departamento, setor: r.setor, admissao: r.admissao,
+    ultimaData: r.ultimaData, demissao: r.afastado ? 'AFASTADO' : '',
+  }));
+}
+
 async function seedIfEmpty() {
   let snap;
   try { snap = await getDocs(collection(db, EMPLOYEES_COL)); }
@@ -1012,7 +1025,15 @@ function openModal(type, f) {
         A planilha atualiza o <strong>cadastro</strong> (nome, cargo, filial, departamento, setor, admissão). O painel mantém o <strong>acompanhamento</strong>: agendamentos e exames lançados aqui não voltam atrás — se a data do painel for mais recente que a da planilha, ela é preservada.
       </p>
       <input type="file" id="import-file-input" accept=".xlsx,.xls,.csv" class="field-input" style="padding:8px">
-      <div id="import-preview" style="font-size:13px;color:var(--muted);min-height:20px;margin:4px 0 10px"></div>
+      <div style="display:flex;align-items:center;gap:10px;margin:2px 0 10px">
+        <div style="flex:1;height:1px;background:var(--border)"></div>
+        <span style="font-size:12px;color:var(--muted)">ou</span>
+        <div style="flex:1;height:1px;background:var(--border)"></div>
+      </div>
+      <button class="btn-secondary" id="btn-usar-seed" style="width:100%;justify-content:center;background:#EEF1F0;color:var(--text);border:1px solid var(--border)">
+        Usar a base nacional já preparada (data.json)
+      </button>
+      <div id="import-preview" style="font-size:13px;color:var(--muted);min-height:20px;margin:10px 0"></div>
       <label style="display:flex;gap:8px;align-items:flex-start;font-size:13px;margin-bottom:8px">
         <input type="checkbox" id="opt-afast" checked style="margin-top:2px">
         <span>Atualizar afastamentos pela coluna DEMISSAO (quem saiu de "AFASTADO" volta a ativo)</span>
@@ -1024,9 +1045,25 @@ function openModal(type, f) {
       <button class="modal-primary" style="background:#1A1A1A" id="modal-save" disabled>Sincronizar</button>
     `;
     const fileInput = document.getElementById('import-file-input');
+    const seedBtn = document.getElementById('btn-usar-seed');
     const preview = document.getElementById('import-preview');
     const saveBtn = document.getElementById('modal-save');
     let plan = null;
+
+    const mostrarPrevia = (rows) => {
+      plan = buildSyncPlan(rows, state.employees);
+      document.getElementById('ausentes-hint').textContent = `(${plan.ausentes.length})`;
+      preview.innerHTML = `
+        <div style="background:#F7F9F8;border-radius:8px;padding:10px;line-height:1.7">
+          <strong>${rows.length.toLocaleString('pt-BR')}</strong> linha(s) lidas<br>
+          <span style="color:var(--c-emdia)">+ ${plan.novos.length.toLocaleString('pt-BR')} novo(s) colaborador(es)</span><br>
+          <span style="color:var(--c-agendado)">↻ ${plan.atualizados.length.toLocaleString('pt-BR')} atualizado(s)</span><br>
+          <span style="color:var(--muted)">= ${plan.semMudanca.length.toLocaleString('pt-BR')} sem alteração</span><br>
+          <span style="color:var(--c-afastado)">⚠ ${plan.ausentes.length.toLocaleString('pt-BR')} no painel e fora da base</span>
+          ${plan.revisar.length ? `<br><span style="color:var(--c-vencido)">${plan.revisar.length} linha(s) para revisar: ${escapeHtml(plan.revisar.slice(0, 3).join(' · '))}${plan.revisar.length > 3 ? '…' : ''}</span>` : ''}
+        </div>`;
+      saveBtn.disabled = (plan.novos.length + plan.atualizados.length) === 0;
+    };
 
     fileInput.onchange = async () => {
       const file = fileInput.files[0];
@@ -1034,19 +1071,17 @@ function openModal(type, f) {
       preview.textContent = 'Lendo planilha…';
       saveBtn.disabled = true; plan = null;
       try {
-        const rows = await parseSpreadsheet(file);
-        plan = buildSyncPlan(rows, state.employees);
-        document.getElementById('ausentes-hint').textContent = `(${plan.ausentes.length})`;
-        preview.innerHTML = `
-          <div style="background:#F7F9F8;border-radius:8px;padding:10px;line-height:1.7">
-            <strong>${rows.length.toLocaleString('pt-BR')}</strong> linha(s) lidas<br>
-            <span style="color:var(--c-emdia)">+ ${plan.novos.length.toLocaleString('pt-BR')} novo(s) colaborador(es)</span><br>
-            <span style="color:var(--c-agendado)">↻ ${plan.atualizados.length.toLocaleString('pt-BR')} atualizado(s)</span><br>
-            <span style="color:var(--muted)">= ${plan.semMudanca.length.toLocaleString('pt-BR')} sem alteração</span><br>
-            <span style="color:var(--c-afastado)">⚠ ${plan.ausentes.length.toLocaleString('pt-BR')} no painel e fora da planilha</span>
-            ${plan.revisar.length ? `<br><span style="color:var(--c-vencido)">${plan.revisar.length} linha(s) para revisar: ${escapeHtml(plan.revisar.slice(0, 3).join(' · '))}${plan.revisar.length > 3 ? '…' : ''}</span>` : ''}
-          </div>`;
-        saveBtn.disabled = (plan.novos.length + plan.atualizados.length) === 0;
+        mostrarPrevia(await parseSpreadsheet(file));
+      } catch (e) {
+        preview.innerHTML = `<span style="color:var(--c-vencido)">${escapeHtml(e.message)}</span>`;
+      }
+    };
+
+    seedBtn.onclick = async () => {
+      preview.textContent = 'Lendo a base nacional…';
+      saveBtn.disabled = true; plan = null;
+      try {
+        mostrarPrevia(await loadSeedRows());
       } catch (e) {
         preview.innerHTML = `<span style="color:var(--c-vencido)">${escapeHtml(e.message)}</span>`;
       }
