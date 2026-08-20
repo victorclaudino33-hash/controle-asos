@@ -58,7 +58,10 @@ let state = {
   filial: 'Todas', departamento: 'Todos', setor: 'Todos', status: 'Todos',
   page: 1, verPorFilial: false,
   isManager: false, managerSetor: null, managerDepartamento: null, managerFilial: null,
+  sortBy: 'vencimento', sortDir: 'asc',
+  selecionados: new Set(),
 };
+let buscaDebounceTimer = null;
 const today = new Date(); today.setHours(0,0,0,0);
 
 // ---- Filiais ----
@@ -269,7 +272,7 @@ function buildSyncPlan(rows, employees) {
   return { novos, atualizados, semMudanca, ausentes, revisar };
 }
 
-async function applySync(plan, opts) {
+async function applySync(plan, opts, onProgress) {
   const writes = [];
   plan.novos.forEach(emp => writes.push([emp.id, emp]));
   plan.atualizados.forEach(({ patch, afastadoPlanilha }) => {
@@ -289,6 +292,7 @@ async function applySync(plan, opts) {
     const batch = writeBatch(db);
     writes.slice(i, i + CHUNK).forEach(([id, data]) => batch.set(doc(db, EMPLOYEES_COL, id), data, { merge: true }));
     await batch.commit();
+    if (onProgress) onProgress(Math.min(i + CHUNK, writes.length), writes.length);
   }
   return writes.length;
 }
@@ -309,20 +313,22 @@ function buildDismissalsFromRows(rows, employees) {
   });
   return { matched, notFound };
 }
-async function bulkImportNew(list) {
+async function bulkImportNew(list, onProgress) {
   const CHUNK = 400;
   for (let i = 0; i < list.length; i += CHUNK) {
     const batch = writeBatch(db);
     list.slice(i, i + CHUNK).forEach(emp => batch.set(doc(db, EMPLOYEES_COL, emp.id), emp, { merge: true }));
     await batch.commit();
+    if (onProgress) onProgress(Math.min(i + CHUNK, list.length), list.length);
   }
 }
-async function bulkDismiss(ids) {
+async function bulkDismiss(ids, onProgress) {
   const CHUNK = 400;
   for (let i = 0; i < ids.length; i += CHUNK) {
     const batch = writeBatch(db);
     ids.slice(i, i + CHUNK).forEach(id => batch.set(doc(db, EMPLOYEES_COL, id), { ativo: false, afastado: false, dataAgendada: '' }, { merge: true }));
     await batch.commit();
+    if (onProgress) onProgress(Math.min(i + CHUNK, ids.length), ids.length);
   }
 }
 
@@ -483,7 +489,9 @@ function getScope() {
   return state.employees
     .map(f => ({ ...f, status: getStatus(f) }))
     .filter(f => {
-      if (q && !f.nome.toLowerCase().includes(q) && !(f.matricula || '').toString().includes(state.busca.trim())) return false;
+      if (q && !f.nome.toLowerCase().includes(q)
+        && !(f.matricula || '').toString().includes(state.busca.trim())
+        && !(f.cargo || '').toLowerCase().includes(q)) return false;
       if (state.filial !== 'Todas' && filialOf(f) !== state.filial) return false;
       if (state.departamento !== 'Todos' && f.departamento !== state.departamento) return false;
       if (state.setor !== 'Todos' && f.setor !== state.setor) return false;
@@ -627,14 +635,28 @@ function deleteEmployee(id) {
   showToast('Registro excluído permanentemente.');
 }
 
+// Valor comparável de cada coluna ordenável — string p/ texto, Date p/ data.
+function sortValue(f, col) {
+  switch (col) {
+    case 'filial': return filialOf(f);
+    case 'nome': return f.nome || '';
+    case 'departamento': return f.departamento || '';
+    case 'ultimaData': return f.ultimaData ? new Date(f.ultimaData + 'T00:00:00') : new Date(0);
+    case 'status': return STATUS_META[f.status] ? STATUS_META[f.status].label : '';
+    case 'vencimento':
+    default:
+      return f.ultimaData ? addMonths(f.ultimaData, f.periodicidade || 12) : new Date(0);
+  }
+}
 function getFiltered() {
+  const dir = state.sortDir === 'desc' ? -1 : 1;
   return getScope().filter(f => {
     if (state.status !== 'Todos' && f.status !== state.status) return false;
     return true;
   }).sort((a, b) => {
-    const va = a.ultimaData ? addMonths(a.ultimaData, a.periodicidade || 12) : new Date(0);
-    const vb = b.ultimaData ? addMonths(b.ultimaData, b.periodicidade || 12) : new Date(0);
-    return va - vb;
+    const va = sortValue(a, state.sortBy), vb = sortValue(b, state.sortBy);
+    if (va instanceof Date || vb instanceof Date) return (va - vb) * dir;
+    return va.toString().localeCompare(vb.toString(), 'pt-BR') * dir;
   });
 }
 
@@ -725,15 +747,23 @@ function render() {
     ${state.verPorFilial ? painelPorFilialHtml(getScope()) : ''}
 
     <div class="result-count">${filtered.length.toLocaleString('pt-BR')} registro(s) encontrado(s)</div>
+    ${bulkBarHtml()}
 
     <div class="table-wrap">
       <div class="table-card">
         <table>
           <thead><tr>
-            <th class="col-filial">Filial</th><th>Colaborador</th><th>Departamento</th><th>Última realização</th><th>Vencimento</th><th>Status</th><th>Ações</th>
+            ${state.isManager ? '' : `<th style="width:34px"><input type="checkbox" id="check-all" ${pageItems.length && pageItems.every(f => state.selecionados.has(f.id)) ? 'checked' : ''}></th>`}
+            ${sortableTh('col-filial', 'filial', 'Filial')}
+            ${sortableTh('', 'nome', 'Colaborador')}
+            ${sortableTh('', 'departamento', 'Departamento')}
+            ${sortableTh('', 'ultimaData', 'Última realização')}
+            ${sortableTh('', 'vencimento', 'Vencimento')}
+            ${sortableTh('', 'status', 'Status')}
+            <th>Ações</th>
           </tr></thead>
           <tbody>
-            ${pageItems.length === 0 ? `<tr class="empty-row"><td colspan="7">Nenhum registro encontrado com os filtros atuais.</td></tr>` : pageItems.map(rowHtml).join('')}
+            ${pageItems.length === 0 ? `<tr class="empty-row"><td colspan="${state.isManager ? 7 : 8}">Nenhum registro encontrado com os filtros atuais.</td></tr>` : pageItems.map(rowHtml).join('')}
           </tbody>
         </table>
         <div class="pagination">
@@ -786,6 +816,24 @@ function painelPorFilialHtml(enriched) {
     </div>`;
 }
 
+function sortableTh(extraClass, col, label) {
+  const ativo = state.sortBy === col;
+  const seta = ativo ? (state.sortDir === 'asc' ? ' ↑' : ' ↓') : '';
+  return `<th class="${extraClass} sortable-th" data-sort="${col}" style="cursor:pointer;user-select:none">${label}${seta}</th>`;
+}
+
+function bulkBarHtml() {
+  const n = state.selecionados.size;
+  if (!n || state.isManager) return '';
+  return `
+    <div class="bulk-bar">
+      <span>${n} selecionado(s)</span>
+      <button class="btn-secondary" id="btn-bulk-agendar">${ICONS.calendar} Agendar selecionados</button>
+      <button class="btn-secondary" id="btn-bulk-realizar">${ICONS.check} Marcar como realizado</button>
+      <button class="clear-link" id="btn-bulk-clear">Limpar seleção</button>
+    </div>`;
+}
+
 function countCard(label, value, color, statusKey) {
   const active = statusKey && state.status === statusKey;
   return `<div class="count-card ${active ? 'active' : ''}" style="border-top-color:${color}" data-status="${statusKey || ''}">
@@ -799,6 +847,7 @@ function rowHtml(f) {
   const vencimento = f.ultimaData ? addMonths(f.ultimaData, f.periodicidade || 12) : null;
   return `
     <tr style="border-left-color:${meta.color}">
+      ${state.isManager ? '' : `<td><input type="checkbox" class="row-check" data-id="${f.id}" ${state.selecionados.has(f.id) ? 'checked' : ''}></td>`}
       <td class="col-filial"><span class="filial-tag" data-filial="${escapeAttr(filialOf(f))}">${escapeHtml(filialOf(f))}</span></td>
       <td class="name-cell">
         <div class="name">${escapeHtml(f.nome)}</div>
@@ -847,13 +896,16 @@ function attachEvents() {
   if (btnExport) btnExport.onclick = exportIndicatorsXlsx;
   document.getElementById('btn-logout').onclick = () => signOut(auth);
   document.getElementById('input-busca').oninput = (e) => {
-    state.busca = e.target.value;
-    state.page = 1;
-    const cursorPos = e.target.selectionStart;
-    render();
-    const input = document.getElementById('input-busca');
-    input.focus();
-    input.setSelectionRange(cursorPos, cursorPos);
+    clearTimeout(buscaDebounceTimer);
+    buscaDebounceTimer = setTimeout(() => {
+      state.busca = e.target.value;
+      state.page = 1;
+      const cursorPos = e.target.selectionStart;
+      render();
+      const input = document.getElementById('input-busca');
+      input.focus();
+      input.setSelectionRange(cursorPos, cursorPos);
+    }, 300);
   };
   const selFilial = document.getElementById('select-filial');
   if (selFilial) selFilial.onchange = (e) => {
@@ -890,6 +942,37 @@ function attachEvents() {
   if (prev) prev.onclick = () => { state.page--; render(); };
   if (next) next.onclick = () => { state.page++; render(); };
 
+  document.querySelectorAll('.sortable-th').forEach(th => {
+    th.onclick = () => {
+      const col = th.dataset.sort;
+      if (state.sortBy === col) state.sortDir = state.sortDir === 'asc' ? 'desc' : 'asc';
+      else { state.sortBy = col; state.sortDir = 'asc'; }
+      render();
+    };
+  });
+
+  const checkAll = document.getElementById('check-all');
+  if (checkAll) checkAll.onchange = () => {
+    document.querySelectorAll('.row-check').forEach(cb => {
+      if (checkAll.checked) state.selecionados.add(cb.dataset.id);
+      else state.selecionados.delete(cb.dataset.id);
+    });
+    render();
+  };
+  document.querySelectorAll('.row-check').forEach(cb => {
+    cb.onclick = (ev) => {
+      ev.stopPropagation();
+      if (cb.checked) state.selecionados.add(cb.dataset.id); else state.selecionados.delete(cb.dataset.id);
+      render();
+    };
+  });
+  const btnBulkClear = document.getElementById('btn-bulk-clear');
+  if (btnBulkClear) btnBulkClear.onclick = () => { state.selecionados.clear(); render(); };
+  const btnBulkAgendar = document.getElementById('btn-bulk-agendar');
+  if (btnBulkAgendar) btnBulkAgendar.onclick = () => openBulkModal('agendar');
+  const btnBulkRealizar = document.getElementById('btn-bulk-realizar');
+  if (btnBulkRealizar) btnBulkRealizar.onclick = () => openBulkModal('realizar');
+
   document.querySelectorAll('[data-action]').forEach(btn => {
     btn.onclick = () => {
       const id = btn.dataset.id;
@@ -914,7 +997,67 @@ const TITLES = {
   delete: 'Excluir registro permanentemente',
   'import-new': 'Importar novos colaboradores', 'import-dismiss': 'Importar desligamentos em lote',
   'import-sync': 'Sincronizar base nacional',
+  'bulk-agendar': 'Agendar exame para vários colaboradores', 'bulk-realizar': 'Registrar exame realizado em massa',
 };
+
+// Grava várias atualizações de uma vez (mesmo campo para todos os selecionados),
+// em lotes de até 400 — mesmo limite do Firestore usado no resto do app.
+async function bulkUpdateEmployees(ids, patch, onProgress) {
+  const CHUNK = 400;
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const batch = writeBatch(db);
+    ids.slice(i, i + CHUNK).forEach(id => batch.set(doc(db, EMPLOYEES_COL, id), patch, { merge: true }));
+    await batch.commit();
+    if (onProgress) onProgress(Math.min(i + CHUNK, ids.length), ids.length);
+  }
+}
+
+function openBulkModal(type) {
+  const ids = Array.from(state.selecionados);
+  const root = document.getElementById('modal-root');
+  root.innerHTML = `
+    <div class="overlay" id="overlay">
+      <div class="modal-box">
+        <div class="modal-head"><h3 class="display">${TITLES['bulk-' + type]}</h3><button class="icon-btn" id="modal-close">${ICONS.x}</button></div>
+        <div id="modal-body"></div>
+      </div>
+    </div>`;
+  document.getElementById('overlay').onclick = (e) => { if (e.target.id === 'overlay') closeModal(); };
+  document.getElementById('modal-close').onclick = closeModal;
+  const body = document.getElementById('modal-body');
+  const corBtn = type === 'agendar' ? '#2E6E8E' : '#2F9E62';
+  body.innerHTML = `
+    <p style="font-size:14px;color:var(--muted);margin-top:0">Aplicar a mesma data para os <strong>${ids.length}</strong> colaborador(es) selecionado(s).</p>
+    <label class="field-label">${type === 'agendar' ? 'Data agendada' : 'Data de realização'}</label>
+    <input type="date" class="field-input" id="f-bulk-data">
+    <button class="modal-primary" style="background:${corBtn}" id="modal-save">Aplicar a ${ids.length} colaborador(es)</button>
+    <div id="bulk-progress" style="display:none;margin-top:14px">
+      <div class="bar" style="width:100%"><div class="bar-fill" id="bulk-progress-fill" style="width:0%"></div></div>
+      <div class="bar-lbl mono" id="bulk-progress-lbl" style="margin-left:0;margin-top:6px;display:block"></div>
+    </div>`;
+  document.getElementById('modal-save').onclick = async () => {
+    const val = document.getElementById('f-bulk-data').value;
+    if (!val) { showToast('Escolha uma data.', true); return; }
+    const saveBtn = document.getElementById('modal-save');
+    saveBtn.disabled = true;
+    document.getElementById('bulk-progress').style.display = 'block';
+    const fill = document.getElementById('bulk-progress-fill');
+    const lbl = document.getElementById('bulk-progress-lbl');
+    const patch = type === 'agendar' ? { dataAgendada: val } : { ultimaData: val, dataAgendada: '' };
+    try {
+      await bulkUpdateEmployees(ids, patch, (done, total) => {
+        fill.style.width = Math.round((done / total) * 100) + '%';
+        lbl.textContent = `${done.toLocaleString('pt-BR')} de ${total.toLocaleString('pt-BR')}`;
+      });
+      state.selecionados.clear();
+      closeModal();
+      showToast(`${ids.length} colaborador(es) atualizado(s).`);
+    } catch (e) {
+      showToast('Não foi possível concluir: ' + e.message, true);
+      saveBtn.disabled = false;
+    }
+  };
+}
 
 function openModal(type, f) {
   const root = document.getElementById('modal-root');
@@ -1043,6 +1186,10 @@ function openModal(type, f) {
         <span>Marcar como <strong>desligado</strong> quem está no painel e não aparece na planilha <em id="ausentes-hint"></em></span>
       </label>
       <button class="modal-primary" style="background:#1A1A1A" id="modal-save" disabled>Sincronizar</button>
+      <div id="sync-progress" style="display:none;margin-top:14px">
+        <div class="bar" style="width:100%"><div class="bar-fill" id="sync-progress-fill" style="width:0%"></div></div>
+        <div class="bar-lbl mono" id="sync-progress-lbl" style="margin-left:0;margin-top:6px;display:block"></div>
+      </div>
     `;
     const fileInput = document.getElementById('import-file-input');
     const seedBtn = document.getElementById('btn-usar-seed');
@@ -1090,10 +1237,16 @@ function openModal(type, f) {
     saveBtn.onclick = async () => {
       if (!plan) return;
       saveBtn.disabled = true; saveBtn.textContent = 'Sincronizando…';
+      document.getElementById('sync-progress').style.display = 'block';
+      const fill = document.getElementById('sync-progress-fill');
+      const lbl = document.getElementById('sync-progress-lbl');
       try {
         const total = await applySync(plan, {
           sincronizarAfastamentos: document.getElementById('opt-afast').checked,
           desligarAusentes: document.getElementById('opt-ausentes').checked,
+        }, (done, totalWrites) => {
+          fill.style.width = Math.round((done / totalWrites) * 100) + '%';
+          lbl.textContent = `Gravando ${done.toLocaleString('pt-BR')} de ${totalWrites.toLocaleString('pt-BR')}`;
         });
         closeModal();
         showToast(`Base sincronizada — ${total.toLocaleString('pt-BR')} registro(s) gravado(s).`);
@@ -1121,6 +1274,10 @@ function openModal(type, f) {
       <input type="file" id="import-file-input" accept=".xlsx,.xls,.csv" class="field-input" style="padding:8px">
       <div id="import-preview" style="font-size:13px;color:var(--muted);min-height:20px;margin:4px 0 14px"></div>
       <button class="modal-primary" style="background:#1A1A1A" id="modal-save" disabled>${isNew ? 'Importar colaboradores' : 'Confirmar desligamentos'}</button>
+      <div id="import-progress" style="display:none;margin-top:14px">
+        <div class="bar" style="width:100%"><div class="bar-fill" id="import-progress-fill" style="width:0%"></div></div>
+        <div class="bar-lbl mono" id="import-progress-lbl" style="margin-left:0;margin-top:6px;display:block"></div>
+      </div>
     `;
     const fileInput = document.getElementById('import-file-input');
     const preview = document.getElementById('import-preview');
@@ -1156,9 +1313,16 @@ function openModal(type, f) {
       if (!ready || !ready.length) return;
       saveBtn.disabled = true;
       saveBtn.textContent = 'Importando…';
+      document.getElementById('import-progress').style.display = 'block';
+      const fill = document.getElementById('import-progress-fill');
+      const lbl = document.getElementById('import-progress-lbl');
+      const onProgress = (done, total) => {
+        fill.style.width = Math.round((done / total) * 100) + '%';
+        lbl.textContent = `${done.toLocaleString('pt-BR')} de ${total.toLocaleString('pt-BR')}`;
+      };
       try {
-        if (isNew) { await bulkImportNew(ready); showToast(`${ready.length} colaborador(es) importado(s).`); }
-        else { await bulkDismiss(ready); showToast(`${ready.length} colaborador(es) marcado(s) como desligados.`); }
+        if (isNew) { await bulkImportNew(ready, onProgress); showToast(`${ready.length} colaborador(es) importado(s).`); }
+        else { await bulkDismiss(ready, onProgress); showToast(`${ready.length} colaborador(es) marcado(s) como desligados.`); }
         closeModal();
       } catch (e) {
         showToast('Não foi possível concluir a importação: ' + e.message, true);
