@@ -42,6 +42,8 @@ const ICONS = {
   sheet: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9M15 9v12"/></svg>',
 };
 
+const MESES = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
+
 const STATUS_META = {
   vencido:   { label: 'Vencido',                 color: 'var(--c-vencido)',   bg: 'var(--c-vencido-bg)' },
   vence30:   { label: 'Vence em 30 dias',         color: 'var(--c-vence30)',   bg: 'var(--c-vence30-bg)' },
@@ -60,6 +62,7 @@ let state = {
   isManager: false, managerSetor: null, managerDepartamento: null, managerFilial: null,
   sortBy: 'vencimento', sortDir: 'asc',
   selecionados: new Set(),
+  anoVenc: 'Todos', mesVenc: 'Todos',
 };
 let buscaDebounceTimer = null;
 const today = new Date(); today.setHours(0,0,0,0);
@@ -487,7 +490,11 @@ function getStatus(f) {
 function getScope() {
   const q = state.busca.trim().toLowerCase();
   return state.employees
-    .map(f => ({ ...f, status: getStatus(f) }))
+    .map(f => {
+      const status = getStatus(f);
+      const vencimento = f.ultimaData ? addMonths(f.ultimaData, f.periodicidade || 12) : null;
+      return { ...f, status, vencimento };
+    })
     .filter(f => {
       if (q && !f.nome.toLowerCase().includes(q)
         && !(f.matricula || '').toString().includes(state.busca.trim())
@@ -495,6 +502,8 @@ function getScope() {
       if (state.filial !== 'Todas' && filialOf(f) !== state.filial) return false;
       if (state.departamento !== 'Todos' && f.departamento !== state.departamento) return false;
       if (state.setor !== 'Todos' && f.setor !== state.setor) return false;
+      if (state.anoVenc !== 'Todos' && (!f.vencimento || f.vencimento.getFullYear() !== Number(state.anoVenc))) return false;
+      if (state.mesVenc !== 'Todos' && (!f.vencimento || f.vencimento.getMonth() + 1 !== Number(state.mesVenc))) return false;
       return true;
     });
 }
@@ -676,7 +685,11 @@ function render() {
   const setores = ['Todos', ...Array.from(new Set(noDepto.map(f => f.setor).filter(Boolean))).sort((a, b) => a.localeCompare(b, 'pt-BR'))];
   if (!departamentos.includes(state.departamento)) state.departamento = 'Todos';
   if (!setores.includes(state.setor)) state.setor = 'Todos';
-  const temFiltro = state.filial !== 'Todas' || state.departamento !== 'Todos' || state.setor !== 'Todos' || state.status !== 'Todos' || state.busca;
+  const anosVenc = ['Todos', ...Array.from(new Set(
+    state.employees.filter(f => f.ultimaData).map(f => addMonths(f.ultimaData, f.periodicidade || 12).getFullYear())
+  )).sort((a, b) => a - b)];
+  const temFiltro = state.filial !== 'Todas' || state.departamento !== 'Todos' || state.setor !== 'Todos' || state.status !== 'Todos' || state.busca
+    || state.anoVenc !== 'Todos' || state.mesVenc !== 'Todos';
   const pctEmDia = ativos ? Math.round(((counts.em_dia || 0) / ativos) * 100) : 0;
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
@@ -738,6 +751,18 @@ function render() {
         <select id="select-status">
           <option value="Todos" ${state.status === 'Todos' ? 'selected' : ''}>Todos os status</option>
           ${Object.entries(STATUS_META).map(([k, v]) => `<option value="${k}" ${state.status === k ? 'selected' : ''}>${v.label}</option>`).join('')}
+        </select>${ICONS.chevron}
+      </div>
+      <div class="select-wrap">
+        <select id="select-ano-venc">
+          <option value="Todos" ${state.anoVenc === 'Todos' ? 'selected' : ''}>Ano de vencimento</option>
+          ${anosVenc.filter(a => a !== 'Todos').map(a => `<option value="${a}" ${String(a) === String(state.anoVenc) ? 'selected' : ''}>${a}</option>`).join('')}
+        </select>${ICONS.chevron}
+      </div>
+      <div class="select-wrap">
+        <select id="select-mes-venc">
+          <option value="Todos" ${state.mesVenc === 'Todos' ? 'selected' : ''}>Mês de vencimento</option>
+          ${MESES.map((m, i) => `<option value="${i + 1}" ${String(i + 1) === String(state.mesVenc) ? 'selected' : ''}>${m}</option>`).join('')}
         </select>${ICONS.chevron}
       </div>
       <button class="clear-link" id="btn-por-filial">${state.verPorFilial ? 'Ocultar visão por filial' : 'Ver por filial'}</button>
@@ -916,11 +941,14 @@ function attachEvents() {
   document.getElementById('select-depto').onchange = (e) => { state.departamento = e.target.value; state.setor = 'Todos'; state.page = 1; render(); };
   document.getElementById('select-setor').onchange = (e) => { state.setor = e.target.value; state.page = 1; render(); };
   document.getElementById('select-status').onchange = (e) => { state.status = e.target.value; state.page = 1; render(); };
+  document.getElementById('select-ano-venc').onchange = (e) => { state.anoVenc = e.target.value; state.page = 1; render(); };
+  document.getElementById('select-mes-venc').onchange = (e) => { state.mesVenc = e.target.value; state.page = 1; render(); };
   const btnPorFilial = document.getElementById('btn-por-filial');
   if (btnPorFilial) btnPorFilial.onclick = () => { state.verPorFilial = !state.verPorFilial; render(); };
   const clearBtn = document.getElementById('btn-clear');
   if (clearBtn) clearBtn.onclick = () => {
     state.busca = ''; state.status = 'Todos'; state.departamento = 'Todos'; state.setor = 'Todos';
+    state.anoVenc = 'Todos'; state.mesVenc = 'Todos';
     if (!state.isManager || state.managerFilial === '*' || !state.managerFilial) state.filial = 'Todas';
     state.page = 1; render();
   };
