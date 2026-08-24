@@ -56,6 +56,30 @@ table { border-collapse: collapse; width: 100%; }
 }
 .btn-secondary:hover { background: rgba(255,255,255,0.18); }
 
+/* Banner de atenção */
+.attention-banner {
+  margin: 18px 32px 0; background: var(--c-vencido-bg); border: 1px solid #F0C4B8; border-radius: 10px;
+  padding: 12px 16px; display: flex; align-items: center; gap: 10px; font-size: 13.5px; color: #7A2E20;
+}
+.attention-banner span { flex: 1; }
+.banner-link { background: #7A2E20; color: #fff; border: none; padding: 7px 14px; border-radius: 7px; font-size: 12.5px; font-weight: 600; white-space: nowrap; }
+
+/* Indicador de sincronização (robozinho) */
+.sync-indicator {
+  margin: 14px 32px 0; display: flex; align-items: center; gap: 8px; font-size: 12.5px; padding: 8px 14px;
+  border-radius: 8px; width: fit-content;
+}
+.sync-indicator svg { width: 14px; height: 14px; flex-shrink: 0; }
+.sync-on { background: var(--c-emdia-bg); color: #1F6B44; }
+.sync-on svg { stroke: #1F6B44; }
+.sync-off { background: #EEF1F0; color: var(--muted); }
+.sync-off svg { stroke: var(--muted); }
+.sync-pend { font-weight: 600; }
+
+@media (max-width: 640px) {
+  .attention-banner, .sync-indicator { margin-left: 16px; margin-right: 16px; }
+}
+
 /* Counters */
 .counters { padding: 22px 32px 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
 .count-card {
@@ -103,6 +127,13 @@ tbody tr { border-left: 4px solid transparent; }
 .empty-row td { padding: 32px; text-align: center; color: #7C8B87; }
 .sched-note { font-size: 11px; color: var(--c-agendado); margin-top: 2px; }
 .afastado-note { font-size: 11px; color: var(--c-afastado); margin-top: 2px; }
+.hist-link { display: inline-flex; vertical-align: middle; margin-left: 6px; border: none; background: transparent; padding: 2px; border-radius: 4px; cursor: pointer; }
+.hist-link:hover { background: rgba(0,0,0,0.06); }
+.hist-timeline { list-style: none; margin: 0; padding: 0; }
+.hist-timeline li { display: flex; gap: 10px; padding: 10px 0; border-bottom: 1px solid #EEF1F0; font-size: 13.5px; }
+.hist-timeline li:last-child { border-bottom: none; }
+.hist-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--c-emdia); margin-top: 5px; flex-shrink: 0; }
+.hist-dot.robo { background: var(--c-agendado); }
 
 /* Filial */
 .col-filial { white-space: nowrap; }
