@@ -21,8 +21,13 @@ try {
 }
 const auth = getAuth(fbApp);
 const EMPLOYEES_COL = 'employees';
+const META_COL = '_meta';
+const SYNC_DOC = 'robozinho'; // doc que o robô de leitura de e-mails vai escrever: { lastRun, pendentes }
+// URL do projeto do robozinho na Vercel — troque pelo domínio real depois do deploy.
+const ROBOZINHO_API = 'https://SEU-PROJETO-ROBOZINHO.vercel.app/api/aso';
 const PAGE_SIZE = 50;
 let unsubscribeSnapshot = null;
+let unsubscribeSyncMeta = null;
 
 const ICONS = {
   search: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#7C8B87" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>',
@@ -40,6 +45,8 @@ const ICONS = {
   alert: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#C4432E" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><path d="M12 9v4M12 17h.01"/></svg>',
   upload: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>',
   sheet: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9M15 9v12"/></svg>',
+  eye: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#2E6E8E" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>',
+  clock: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#6B6B6B" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>',
 };
 
 const MESES = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
@@ -63,6 +70,9 @@ let state = {
   sortBy: 'vencimento', sortDir: 'asc',
   selecionados: new Set(),
   anoVenc: 'Todos', mesVenc: 'Todos',
+  somenteRevisao: false,
+  syncMeta: null, // { lastRun: Timestamp|null, pendentes: number } — escrito pelo robô
+  tendenciaAberta: false,
 };
 let buscaDebounceTimer = null;
 const today = new Date(); today.setHours(0,0,0,0);
@@ -113,6 +123,11 @@ function fmt(dateStr) {
   return d.toLocaleDateString('pt-BR');
 }
 function daysBetween(a, b) { return Math.round((a - b) / 86400000); }
+function fmtDateTime(ts) {
+  if (!ts) return null;
+  const d = ts.toDate ? ts.toDate() : new Date(ts);
+  return d.toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+}
 
 // ---- Importação de planilhas (novos colaboradores / desligamentos) ----
 const FIELD_MAP = {
@@ -504,6 +519,7 @@ function getScope() {
       if (state.setor !== 'Todos' && f.setor !== state.setor) return false;
       if (state.anoVenc !== 'Todos' && (!f.vencimento || f.vencimento.getFullYear() !== Number(state.anoVenc))) return false;
       if (state.mesVenc !== 'Todos' && (!f.vencimento || f.vencimento.getMonth() + 1 !== Number(state.mesVenc))) return false;
+      if (state.somenteRevisao && !f.revisaoPendente) return false;
       return true;
     });
 }
@@ -610,6 +626,14 @@ function listenToEmployees() {
   }, (err) => {
     showToast('Erro ao conectar ao banco de dados: ' + err.message, true);
   });
+  if (!state.isManager) listenToSyncMeta();
+}
+function listenToSyncMeta() {
+  if (unsubscribeSyncMeta) return;
+  unsubscribeSyncMeta = onSnapshot(doc(db, META_COL, SYNC_DOC), (snap) => {
+    state.syncMeta = snap.exists() ? snap.data() : null;
+    render();
+  }, () => { /* doc pode não existir ainda — robô não configurado */ });
 }
 
 async function saveEmployee(id, data) {
@@ -630,7 +654,15 @@ function showToast(msg, isError) {
 function updateEmployee(id, patch) {
   const idx = state.employees.findIndex(f => f.id === id);
   if (idx === -1) return;
-  const updated = { ...state.employees[idx], ...patch };
+  const atual = state.employees[idx];
+  // Toda vez que a data do exame muda, registra uma entrada no histórico do colaborador
+  // (mantém as últimas 20 — histórico é pra consulta, não um arquivo morto crescendo à toa).
+  if (patch.ultimaData && patch.ultimaData !== atual.ultimaData) {
+    const historico = Array.isArray(atual.historico) ? atual.historico.slice(-19) : [];
+    historico.push({ data: patch.ultimaData, registradoEm: new Date().toISOString(), origem: 'manual' });
+    patch = { ...patch, historico };
+  }
+  const updated = { ...atual, ...patch };
   saveEmployee(id, updated); // onSnapshot will re-render once Firestore confirms
 }
 function addEmployee(data) {
@@ -708,6 +740,7 @@ function render() {
       </div>
       <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
         ${state.isManager ? `<button class="btn-secondary" id="btn-export-xlsx">${ICONS.sheet} Baixar indicadores</button>` : `
+          <button class="btn-secondary" id="btn-tendencia">${ICONS.sheet} ${state.tendenciaAberta ? 'Ocultar' : 'Ver'} tendência</button>
           <button class="btn-secondary" id="btn-import-sync">${ICONS.upload} Sincronizar base nacional</button>
           <button class="btn-secondary" id="btn-import-new">${ICONS.upload} Importar colaboradores</button>
           <button class="btn-secondary" id="btn-import-dismiss">${ICONS.upload} Importar desligamentos</button>
@@ -717,6 +750,9 @@ function render() {
         <button class="logout-btn" id="btn-logout">Sair (${escapeHtml(auth.currentUser ? auth.currentUser.email : '')})</button>
       </div>
     </div>
+
+    ${!state.isManager ? syncIndicator() : ''}
+    ${attentionBanner(counts)}
 
     <div class="counters">
       ${countCard(`Total ativos${ativos ? ` · ${pctEmDia}% em dia` : ''}`, ativos, 'var(--pine)', null)}
@@ -728,7 +764,10 @@ function render() {
       ${countCard('Sem exame', counts.sem_exame || 0, 'var(--c-semexame)', 'sem_exame')}
       ${countCard('Afastados', counts.afastado || 0, 'var(--c-afastado)', 'afastado')}
       ${countCard('Desligados', counts.inativo || 0, 'var(--c-inativo)', 'inativo')}
+      ${revisaoCard(scope)}
     </div>
+
+    ${state.tendenciaAberta ? tendenciaPanel(scope) : ''}
 
     <div class="toolbar">
       <div class="search-wrap">${ICONS.search}<input id="input-busca" placeholder="Buscar por nome ou matrícula" value="${escapeAttr(state.busca)}"></div>
@@ -866,6 +905,77 @@ function countCard(label, value, color, statusKey) {
     <div class="lbl">${label}</div>
   </div>`;
 }
+function revisaoCard(scope) {
+  const pendentes = scope.filter(f => f.revisaoPendente).length;
+  if (!pendentes && !state.somenteRevisao) return '';
+  return `<div class="count-card ${state.somenteRevisao ? 'active' : ''}" style="border-top-color:#B7791E" data-revisao="1">
+    <div class="val mono" style="color:#B7791E">${pendentes.toLocaleString('pt-BR')}</div>
+    <div class="lbl">Pendente de revisão (robô)</div>
+  </div>`;
+}
+// Banner: chama atenção pra vencidos/vence30 assim que a pessoa entra, sem precisar filtrar antes.
+function attentionBanner(counts) {
+  const vencidos = counts.vencido || 0;
+  const vence30 = counts.vence30 || 0;
+  if (!vencidos && !vence30) return '';
+  const partes = [];
+  if (vencidos) partes.push(`<strong>${vencidos}</strong> vencido${vencidos > 1 ? 's' : ''}`);
+  if (vence30) partes.push(`<strong>${vence30}</strong> vencendo em 30 dias`);
+  return `
+    <div class="attention-banner" id="attention-banner">
+      ${ICONS.alert}
+      <span>${partes.join(' · ')} — vale conferir antes de seguir com outras tarefas.</span>
+      <button class="banner-link" id="banner-ver-vencidos">Ver agora</button>
+    </div>`;
+}
+function syncIndicator() {
+  const meta = state.syncMeta;
+  if (!meta) {
+    return `<div class="sync-indicator sync-off">${ICONS.rotate} Robô de sincronização automática ainda não configurado</div>`;
+  }
+  const quando = fmtDateTime(meta.lastRun);
+  const pend = meta.pendentes || 0;
+  return `<div class="sync-indicator sync-on">
+    ${ICONS.rotate} Última sincronização automática: ${quando || '—'}
+    ${pend ? `<span class="sync-pend">· ${pend} pendente${pend > 1 ? 's' : ''} de revisão</span>` : ''}
+  </div>`;
+}
+// Distribui os vencimentos dos próximos 6 meses (a partir do mês atual) — não é
+// histórico (não guardamos snapshots diários), é a projeção do que está por vir,
+// pra você enxergar se um mês específico vai concentrar muito trabalho.
+function tendenciaPanel(scope) {
+  const hoje = new Date();
+  const meses = [];
+  for (let i = 0; i < 6; i++) {
+    const d = new Date(hoje.getFullYear(), hoje.getMonth() + i, 1);
+    meses.push({ ano: d.getFullYear(), mes: d.getMonth(), label: d.toLocaleDateString('pt-BR', { month: 'short' }).replace('.', ''), count: 0 });
+  }
+  scope.forEach(f => {
+    if (!f.vencimento) return;
+    const v = f.vencimento;
+    const idx = meses.findIndex(m => m.ano === v.getFullYear() && m.mes === v.getMonth());
+    if (idx !== -1) meses[idx].count++;
+  });
+  const max = Math.max(1, ...meses.map(m => m.count));
+  const barMax = 90;
+  return `
+    <div class="filial-panel">
+      <div class="filial-panel-head">
+        <strong>Vencimentos por mês (próximos 6 meses)</strong>
+        <span>Projeção com base nas datas de vencimento atuais — não é histórico</span>
+      </div>
+      <div style="display:flex;gap:22px;align-items:flex-end;padding:20px 24px 24px;overflow-x:auto">
+        ${meses.map(m => `
+          <div style="display:flex;flex-direction:column;align-items:center;gap:8px;min-width:52px">
+            <div class="mono" style="font-size:12.5px;color:${m.count > 0 ? 'var(--c-vence30)' : 'var(--muted)'};font-weight:600">${m.count}</div>
+            <div style="width:32px;height:${barMax}px;background:#EEF1F0;border-radius:6px;display:flex;align-items:flex-end;overflow:hidden">
+              <div style="width:100%;height:${Math.round((m.count / max) * barMax)}px;background:${m.count > 0 ? 'var(--c-vence30)' : '#DCDCDC'};border-radius:6px 6px 0 0"></div>
+            </div>
+            <div style="font-size:12px;color:var(--muted);text-transform:capitalize">${m.label}</div>
+          </div>`).join('')}
+      </div>
+    </div>`;
+}
 
 function rowHtml(f) {
   const meta = STATUS_META[f.status];
@@ -879,7 +989,10 @@ function rowHtml(f) {
         <div class="meta mono">Matr. ${escapeHtml(f.matricula || '—')} · ${escapeHtml(f.cargo || '')}</div>
       </td>
       <td>${escapeHtml(f.departamento || '—')}${f.setor ? `<div class="meta" style="font-size:11.5px;color:#8A9793">${escapeHtml(f.setor)}</div>` : ''}</td>
-      <td class="mono">${fmt(f.ultimaData)}</td>
+      <td class="mono">
+        ${fmt(f.ultimaData)}
+        ${Array.isArray(f.historico) && f.historico.length ? `<button class="hist-link" data-id="${f.id}" title="Ver histórico de exames">${ICONS.clock || '↻'}</button>` : ''}
+      </td>
       <td class="mono">
         ${vencimento ? fmt(vencimento) : '—'}
         ${f.dataAgendada && f.status === 'agendado' ? `<div class="sched-note">agendado: ${fmt(f.dataAgendada)}</div>` : ''}
@@ -888,6 +1001,7 @@ function rowHtml(f) {
       <td><span class="badge" style="background:${meta.bg};color:${meta.color}">${meta.label}</span></td>
       <td>
         <div class="row-actions">
+          ${!state.isManager && f.ultimoAsoPath ? `<button class="icon-btn" title="Ver ASO" data-action="ver-aso" data-id="${f.id}" data-matricula="${escapeAttr(f.matricula || f.id)}">${ICONS.eye}</button>` : ''}
           ${state.isManager ? '<span style="color:#8A9793;font-size:12px">—</span>' : (f.ativo ? (f.afastado ? `
             <button class="icon-btn" title="Editar" data-action="edit" data-id="${f.id}">${ICONS.edit}</button>
             <button class="icon-btn" title="Registrar retorno" data-action="retornar" data-id="${f.id}">${ICONS.rotate}</button>
@@ -964,8 +1078,22 @@ function attachEvents() {
   });
 
   document.querySelectorAll('.count-card').forEach(el => {
-    el.onclick = () => { state.status = el.dataset.status || 'Todos'; state.page = 1; render(); };
+    el.onclick = () => {
+      if (el.dataset.revisao) { state.somenteRevisao = !state.somenteRevisao; state.page = 1; render(); return; }
+      state.status = el.dataset.status || 'Todos'; state.page = 1; render();
+    };
   });
+  const bannerBtn = document.getElementById('banner-ver-vencidos');
+  if (bannerBtn) bannerBtn.onclick = () => { state.status = counts.vencido ? 'vencido' : 'vence30'; state.page = 1; render(); };
+  document.querySelectorAll('.hist-link').forEach(btn => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      const f = state.employees.find(x => x.id === btn.dataset.id);
+      if (f) openModal('historico', f);
+    };
+  });
+  const btnTendencia = document.getElementById('btn-tendencia');
+  if (btnTendencia) btnTendencia.onclick = () => { state.tendenciaAberta = !state.tendenciaAberta; render(); };
   const prev = document.getElementById('pg-prev'), next = document.getElementById('pg-next');
   if (prev) prev.onclick = () => { state.page--; render(); };
   if (next) next.onclick = () => { state.page++; render(); };
@@ -1014,6 +1142,7 @@ function attachEvents() {
       else if (action === 'retornar') openModal('retornar', f);
       else if (action === 'desligar') updateEmployee(id, { ativo: false, afastado: false, dataAgendada: '' });
       else if (action === 'reativar') updateEmployee(id, { ativo: true });
+      else if (action === 'ver-aso') viewAso(btn.dataset.matricula);
     };
   });
 }
@@ -1026,6 +1155,7 @@ const TITLES = {
   'import-new': 'Importar novos colaboradores', 'import-dismiss': 'Importar desligamentos em lote',
   'import-sync': 'Sincronizar base nacional',
   'bulk-agendar': 'Agendar exame para vários colaboradores', 'bulk-realizar': 'Registrar exame realizado em massa',
+  historico: 'Histórico de exames',
 };
 
 // Grava várias atualizações de uma vez (mesmo campo para todos os selecionados),
@@ -1155,6 +1285,16 @@ function openModal(type, f) {
       updateEmployee(f.id, { ultimaData: val, dataAgendada: '' });
       closeModal(); showToast('Exame registrado como realizado.');
     };
+  } else if (type === 'historico') {
+    const itens = [...(f.historico || [])].sort((a, b) => (b.data || '').localeCompare(a.data || ''));
+    body.innerHTML = `
+      <p style="font-size:13.5px;color:var(--muted);margin-top:0">Exames de <strong>${escapeHtml(f.nome)}</strong>, mais recente primeiro.</p>
+      <ul class="hist-timeline">
+        ${itens.map(h => `<li>
+          <span class="hist-dot ${h.origem === 'robô' ? 'robo' : ''}"></span>
+          <span><strong>${fmt(h.data)}</strong><br><span style="color:var(--muted);font-size:12px">${h.origem === 'robô' ? 'Lançado automaticamente pelo robô' : 'Lançado manualmente'}</span></span>
+        </li>`).join('') || '<li style="color:var(--muted)">Nenhum histórico registrado ainda.</li>'}
+      </ul>`;
   } else if (type === 'afastar') {
     body.innerHTML = `
       <p style="font-size:14px;color:var(--muted);margin-top:0">Registre o afastamento de <strong>${escapeHtml(f.nome)}</strong> (licença médica, INSS, etc). O colaborador continua ativo, mas fica marcado como afastado até o retorno.</p>
@@ -1362,6 +1502,29 @@ function openModal(type, f) {
 }
 function closeModal() { document.getElementById('modal-root').innerHTML = ''; }
 
+// Abre o PDF do ASO decriptado numa nova aba. O endpoint confere pelo token que
+// quem está pedindo não é um gestor — se for, a própria API recusa (403).
+async function viewAso(matricula) {
+  try {
+    const token = await auth.currentUser.getIdToken();
+    const resp = await fetch(`${ROBOZINHO_API}?matricula=${encodeURIComponent(matricula)}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!resp.ok) {
+      const body = await resp.json().catch(() => ({}));
+      showToast(body.error || 'Não foi possível abrir o ASO.', true);
+      return;
+    }
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    window.open(url, '_blank');
+    // o objeto ainda existe na aba nova; liberamos a memória depois de um tempo generoso
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  } catch (e) {
+    showToast('Não foi possível abrir o ASO: ' + e.message, true);
+  }
+}
+
 function renderLogin(errorMsg) {
   const app = document.getElementById('app');
   app.innerHTML = `
@@ -1399,6 +1562,8 @@ onAuthStateChanged(auth, async (user) => {
     listenToEmployees();
   } else {
     if (unsubscribeSnapshot) { unsubscribeSnapshot(); unsubscribeSnapshot = null; }
+    if (unsubscribeSyncMeta) { unsubscribeSyncMeta(); unsubscribeSyncMeta = null; }
+    state.syncMeta = null;
     state.isManager = false;
     state.managerSetor = null;
     state.managerDepartamento = null;
