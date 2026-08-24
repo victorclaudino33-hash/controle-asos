@@ -1,0 +1,20 @@
+{
+  "name": "robozinho-aso",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "sync": "node lib/run-local.js"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.658.1",
+    "firebase-admin": "^12.5.0",
+    "imapflow": "^1.0.161",
+    "mailparser": "^3.7.1",
+    "pdf-to-img": "^4.4.0",
+    "tesseract.js": "^5.1.1"
+  },
+  "devDependencies": {
+    "dotenv": "^16.4.5"
+  }
+}
