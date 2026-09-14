@@ -75,6 +75,7 @@ let state = {
   tendenciaAberta: false,
 };
 let buscaDebounceTimer = null;
+let lastFilteredIds = []; // ids de todos os registros que passam nos filtros atuais (não só da página)
 const today = new Date(); today.setHours(0,0,0,0);
 
 // ---- Filiais ----
@@ -727,6 +728,7 @@ function render() {
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   if (state.page > totalPages) state.page = totalPages;
   const pageItems = filtered.slice((state.page - 1) * PAGE_SIZE, state.page * PAGE_SIZE);
+  lastFilteredIds = filtered.map(f => f.id);
 
   app.innerHTML = `
     <div class="header">
@@ -770,7 +772,7 @@ function render() {
     ${state.tendenciaAberta ? tendenciaPanel(scope) : ''}
 
     <div class="toolbar">
-      <div class="search-wrap">${ICONS.search}<input id="input-busca" placeholder="Buscar por nome ou matrícula" value="${escapeAttr(state.busca)}"></div>
+      <div class="search-wrap">${ICONS.search}<input id="input-busca" placeholder="Buscar por nome, matrícula ou cargo" aria-label="Buscar colaborador" value="${escapeAttr(state.busca)}"></div>
       <div class="select-wrap">
         <select id="select-filial" ${podeTrocarFilial ? '' : 'disabled title="Seu acesso é restrito a esta filial"'}>
           ${filiais.map(f => `<option value="${escapeAttr(f)}" ${f === state.filial ? 'selected' : ''}>${f === 'Todas' ? 'Todas as filiais' : escapeHtml(f)}</option>`).join('')}
@@ -811,7 +813,7 @@ function render() {
     ${state.verPorFilial ? painelPorFilialHtml(getScope()) : ''}
 
     <div class="result-count">${filtered.length.toLocaleString('pt-BR')} registro(s) encontrado(s)</div>
-    ${bulkBarHtml()}
+    ${bulkBarHtml(filtered.length)}
 
     <div class="table-wrap">
       <div class="table-card">
@@ -834,6 +836,7 @@ function render() {
           <span>Página ${state.page} de ${totalPages}</span>
           <div class="pages">
             <button id="pg-prev" ${state.page === 1 ? 'disabled' : ''}>Anterior</button>
+            ${totalPages > 3 ? `<input type="number" id="pg-jump" min="1" max="${totalPages}" value="${state.page}" aria-label="Ir para a página" style="width:52px;padding:4px 6px;text-align:center;border-radius:6px;border:1px solid var(--border);font-size:13px">` : ''}
             <button id="pg-next" ${state.page === totalPages ? 'disabled' : ''}>Próxima</button>
           </div>
         </div>
@@ -886,12 +889,14 @@ function sortableTh(extraClass, col, label) {
   return `<th class="${extraClass} sortable-th" data-sort="${col}" style="cursor:pointer;user-select:none">${label}${seta}</th>`;
 }
 
-function bulkBarHtml() {
+function bulkBarHtml(totalFiltrado) {
   const n = state.selecionados.size;
   if (!n || state.isManager) return '';
+  const podeSelecionarTodos = totalFiltrado > n && totalFiltrado > PAGE_SIZE;
   return `
     <div class="bulk-bar">
       <span>${n} selecionado(s)</span>
+      ${podeSelecionarTodos ? `<button class="clear-link" id="btn-select-all-filtered" style="color:#C9CFCD">Selecionar todos os ${totalFiltrado.toLocaleString('pt-BR')} filtrados</button>` : ''}
       <button class="btn-secondary" id="btn-bulk-agendar">${ICONS.calendar} Agendar selecionados</button>
       <button class="btn-secondary" id="btn-bulk-realizar">${ICONS.check} Marcar como realizado</button>
       <button class="clear-link" id="btn-bulk-clear">Limpar seleção</button>
@@ -991,7 +996,7 @@ function rowHtml(f) {
       <td>${escapeHtml(f.departamento || '—')}${f.setor ? `<div class="meta" style="font-size:11.5px;color:#8A9793">${escapeHtml(f.setor)}</div>` : ''}</td>
       <td class="mono">
         ${fmt(f.ultimaData)}
-        ${Array.isArray(f.historico) && f.historico.length ? `<button class="hist-link" data-id="${f.id}" title="Ver histórico de exames">${ICONS.clock || '↻'}</button>` : ''}
+        ${Array.isArray(f.historico) && f.historico.length ? `<button class="hist-link" data-id="${f.id}" title="Ver histórico de exames" aria-label="Ver histórico de exames de ${escapeAttr(f.nome)}">${ICONS.clock || '↻'}</button>` : ''}
       </td>
       <td class="mono">
         ${vencimento ? fmt(vencimento) : '—'}
@@ -1001,19 +1006,19 @@ function rowHtml(f) {
       <td><span class="badge" style="background:${meta.bg};color:${meta.color}">${meta.label}</span></td>
       <td>
         <div class="row-actions">
-          ${!state.isManager && f.ultimoAsoPath ? `<button class="icon-btn" title="Ver ASO" data-action="ver-aso" data-id="${f.id}" data-matricula="${escapeAttr(f.matricula || f.id)}">${ICONS.eye}</button>` : ''}
+          ${!state.isManager && f.ultimoAsoPath ? `<button class="icon-btn" title="Ver ASO" aria-label="Ver ASO de ${escapeAttr(f.nome)}" data-action="ver-aso" data-id="${f.id}" data-matricula="${escapeAttr(f.matricula || f.id)}">${ICONS.eye}</button>` : ''}
           ${state.isManager ? '<span style="color:#8A9793;font-size:12px">—</span>' : (f.ativo ? (f.afastado ? `
-            <button class="icon-btn" title="Editar" data-action="edit" data-id="${f.id}">${ICONS.edit}</button>
-            <button class="icon-btn" title="Registrar retorno" data-action="retornar" data-id="${f.id}">${ICONS.rotate}</button>
-            <button class="icon-btn" title="Desligado" data-action="desligar" data-id="${f.id}">${ICONS.userx}</button>
+            <button class="icon-btn" title="Editar" aria-label="Editar ${escapeAttr(f.nome)}" data-action="edit" data-id="${f.id}">${ICONS.edit}</button>
+            <button class="icon-btn" title="Registrar retorno" aria-label="Registrar retorno de ${escapeAttr(f.nome)}" data-action="retornar" data-id="${f.id}">${ICONS.rotate}</button>
+            <button class="icon-btn" title="Desligado" aria-label="Desligar ${escapeAttr(f.nome)}" data-action="desligar" data-id="${f.id}">${ICONS.userx}</button>
           ` : `
-            <button class="icon-btn" title="Marcar como agendado" data-action="agendar" data-id="${f.id}">${ICONS.calendar}</button>
-            <button class="icon-btn" title="Marcar como realizado" data-action="realizar" data-id="${f.id}">${ICONS.check}</button>
-            <button class="icon-btn" title="Editar" data-action="edit" data-id="${f.id}">${ICONS.edit}</button>
-            <button class="icon-btn" title="Afastar (licença/afastamento)" data-action="afastar" data-id="${f.id}">${ICONS.pause}</button>
-            <button class="icon-btn" title="Desligado" data-action="desligar" data-id="${f.id}">${ICONS.userx}</button>
-          `) : `<button class="icon-btn" title="Reativar" data-action="reativar" data-id="${f.id}">${ICONS.usercheck}</button>`)}
-          ${state.isManager ? '' : `<button class="icon-btn" title="Excluir permanentemente" data-action="delete" data-id="${f.id}">${ICONS.trash}</button>`}
+            <button class="icon-btn" title="Marcar como agendado" aria-label="Marcar exame de ${escapeAttr(f.nome)} como agendado" data-action="agendar" data-id="${f.id}">${ICONS.calendar}</button>
+            <button class="icon-btn" title="Marcar como realizado" aria-label="Marcar exame de ${escapeAttr(f.nome)} como realizado" data-action="realizar" data-id="${f.id}">${ICONS.check}</button>
+            <button class="icon-btn" title="Editar" aria-label="Editar ${escapeAttr(f.nome)}" data-action="edit" data-id="${f.id}">${ICONS.edit}</button>
+            <button class="icon-btn" title="Afastar (licença/afastamento)" aria-label="Afastar ${escapeAttr(f.nome)}" data-action="afastar" data-id="${f.id}">${ICONS.pause}</button>
+            <button class="icon-btn" title="Desligado" aria-label="Desligar ${escapeAttr(f.nome)}" data-action="desligar" data-id="${f.id}">${ICONS.userx}</button>
+          `) : `<button class="icon-btn" title="Reativar" aria-label="Reativar ${escapeAttr(f.nome)}" data-action="reativar" data-id="${f.id}">${ICONS.usercheck}</button>`)}
+          ${state.isManager ? '' : `<button class="icon-btn" title="Excluir permanentemente" aria-label="Excluir ${escapeAttr(f.nome)} permanentemente" data-action="delete" data-id="${f.id}">${ICONS.trash}</button>`}
         </div>
       </td>
     </tr>`;
@@ -1032,7 +1037,20 @@ function attachEvents() {
   const btnImportDismiss = document.getElementById('btn-import-dismiss');
   if (btnImportDismiss) btnImportDismiss.onclick = () => openModal('import-dismiss');
   const btnExport = document.getElementById('btn-export-xlsx');
-  if (btnExport) btnExport.onclick = exportIndicatorsXlsx;
+  if (btnExport) btnExport.onclick = async () => {
+    const original = btnExport.innerHTML;
+    btnExport.disabled = true;
+    btnExport.innerHTML = `${ICONS.sheet} Gerando planilha…`;
+    try {
+      await exportIndicatorsXlsx();
+      showToast('Planilha de indicadores baixada.');
+    } catch (e) {
+      showToast('Não foi possível gerar a planilha: ' + e.message, true);
+    } finally {
+      btnExport.disabled = false;
+      btnExport.innerHTML = original;
+    }
+  };
   document.getElementById('btn-logout').onclick = () => signOut(auth);
   document.getElementById('input-busca').oninput = (e) => {
     clearTimeout(buscaDebounceTimer);
@@ -1097,6 +1115,11 @@ function attachEvents() {
   const prev = document.getElementById('pg-prev'), next = document.getElementById('pg-next');
   if (prev) prev.onclick = () => { state.page--; render(); };
   if (next) next.onclick = () => { state.page++; render(); };
+  const pgJump = document.getElementById('pg-jump');
+  if (pgJump) pgJump.onchange = (e) => {
+    const n = Math.max(1, Math.min(Number(e.target.max), Number(e.target.value) || 1));
+    state.page = n; render();
+  };
 
   document.querySelectorAll('.sortable-th').forEach(th => {
     th.onclick = () => {
@@ -1124,6 +1147,11 @@ function attachEvents() {
   });
   const btnBulkClear = document.getElementById('btn-bulk-clear');
   if (btnBulkClear) btnBulkClear.onclick = () => { state.selecionados.clear(); render(); };
+  const btnSelectAllFiltered = document.getElementById('btn-select-all-filtered');
+  if (btnSelectAllFiltered) btnSelectAllFiltered.onclick = () => {
+    lastFilteredIds.forEach(id => state.selecionados.add(id));
+    render();
+  };
   const btnBulkAgendar = document.getElementById('btn-bulk-agendar');
   if (btnBulkAgendar) btnBulkAgendar.onclick = () => openBulkModal('agendar');
   const btnBulkRealizar = document.getElementById('btn-bulk-realizar');
@@ -1140,8 +1168,8 @@ function attachEvents() {
       else if (action === 'delete') openModal('delete', f);
       else if (action === 'afastar') openModal('afastar', f);
       else if (action === 'retornar') openModal('retornar', f);
-      else if (action === 'desligar') updateEmployee(id, { ativo: false, afastado: false, dataAgendada: '' });
-      else if (action === 'reativar') updateEmployee(id, { ativo: true });
+      else if (action === 'desligar') openModal('desligar', f);
+      else if (action === 'reativar') openModal('reativar', f);
       else if (action === 'ver-aso') viewAso(btn.dataset.matricula);
     };
   });
@@ -1152,6 +1180,7 @@ const TITLES = {
   agendar: 'Marcar exame como agendado', realizar: 'Registrar exame realizado',
   afastar: 'Registrar afastamento', retornar: 'Registrar retorno',
   delete: 'Excluir registro permanentemente',
+  desligar: 'Confirmar desligamento', reativar: 'Confirmar reativação',
   'import-new': 'Importar novos colaboradores', 'import-dismiss': 'Importar desligamentos em lote',
   'import-sync': 'Sincronizar base nacional',
   'bulk-agendar': 'Agendar exame para vários colaboradores', 'bulk-realizar': 'Registrar exame realizado em massa',
@@ -1176,7 +1205,7 @@ function openBulkModal(type) {
   root.innerHTML = `
     <div class="overlay" id="overlay">
       <div class="modal-box">
-        <div class="modal-head"><h3 class="display">${TITLES['bulk-' + type]}</h3><button class="icon-btn" id="modal-close">${ICONS.x}</button></div>
+        <div class="modal-head"><h3 class="display">${TITLES['bulk-' + type]}</h3><button class="icon-btn" id="modal-close" aria-label="Fechar">${ICONS.x}</button></div>
         <div id="modal-body"></div>
       </div>
     </div>`;
@@ -1223,7 +1252,7 @@ function openModal(type, f) {
   root.innerHTML = `
     <div class="overlay" id="overlay">
       <div class="modal-box">
-        <div class="modal-head"><h3 class="display">${TITLES[type]}</h3><button class="icon-btn" id="modal-close">${ICONS.x}</button></div>
+        <div class="modal-head"><h3 class="display">${TITLES[type]}</h3><button class="icon-btn" id="modal-close" aria-label="Fechar">${ICONS.x}</button></div>
         <div id="modal-body"></div>
       </div>
     </div>`;
@@ -1318,6 +1347,22 @@ function openModal(type, f) {
       if (!val) { showToast('Escolha uma data.', true); return; }
       updateEmployee(f.id, { afastado: false, dataRetorno: val });
       closeModal(); showToast('Retorno registrado.');
+    };
+  } else if (type === 'desligar') {
+    body.innerHTML = `
+      <div class="warn-box">${ICONS.alert}<p>Isso marca <strong>${escapeHtml(f.nome)}</strong> como desligado. O histórico de exames é mantido — diferente de "Excluir", que apaga tudo.</p></div>
+      <button class="modal-primary" style="background:#A6631B" id="modal-save">Confirmar desligamento</button>`;
+    document.getElementById('modal-save').onclick = () => {
+      updateEmployee(f.id, { ativo: false, afastado: false, dataAgendada: '' });
+      closeModal(); showToast(`${f.nome} marcado como desligado.`);
+    };
+  } else if (type === 'reativar') {
+    body.innerHTML = `
+      <p style="font-size:14px;color:var(--muted);margin-top:0">Confirma reativar <strong>${escapeHtml(f.nome)}</strong>? Ele voltará a aparecer como colaborador ativo no controle.</p>
+      <button class="modal-primary" style="background:#2F9E62" id="modal-save">Confirmar reativação</button>`;
+    document.getElementById('modal-save').onclick = () => {
+      updateEmployee(f.id, { ativo: true });
+      closeModal(); showToast(`${f.nome} reativado.`);
     };
   } else if (type === 'delete') {
     body.innerHTML = `
@@ -1501,6 +1546,18 @@ function openModal(type, f) {
   }
 }
 function closeModal() { document.getElementById('modal-root').innerHTML = ''; }
+
+// Esc fecha o modal aberto; Enter confirma a ação primária quando o foco está
+// num campo do modal (input/select), sem interferir com a tabela por trás.
+document.addEventListener('keydown', (e) => {
+  const overlay = document.getElementById('overlay');
+  if (!overlay) return;
+  if (e.key === 'Escape') { closeModal(); return; }
+  if (e.key === 'Enter' && ['INPUT', 'SELECT'].includes(document.activeElement?.tagName)) {
+    const saveBtn = document.getElementById('modal-save');
+    if (saveBtn && !saveBtn.disabled) { e.preventDefault(); saveBtn.click(); }
+  }
+});
 
 // Abre o PDF do ASO decriptado numa nova aba. O endpoint confere pelo token que
 // quem está pedindo não é um gestor — se for, a própria API recusa (403).
