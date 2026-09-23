@@ -512,12 +512,7 @@ function getScope() {
       return { ...f, status, vencimento };
     })
     .filter(f => {
-      if (q && !f.nome.toLowerCase().includes(q)
-        && !(f.matricula || '').toString().includes(state.busca.trim())
-        && !(f.cargo || '').toLowerCase().includes(q)) return false;
-      if (state.filial !== 'Todas' && filialOf(f) !== state.filial) return false;
-      if (state.departamento !== 'Todos' && f.departamento !== state.departamento) return false;
-      if (state.setor !== 'Todos' && f.setor !== state.setor) return false;
+      if (q && !(f.nome || '').toLowerCase().includes(q)) return false;
       if (state.anoVenc !== 'Todos' && (!f.vencimento || f.vencimento.getFullYear() !== Number(state.anoVenc))) return false;
       if (state.mesVenc !== 'Todos' && (!f.vencimento || f.vencimento.getMonth() + 1 !== Number(state.mesVenc))) return false;
       if (state.somenteRevisao && !f.revisaoPendente) return false;
@@ -525,9 +520,6 @@ function getScope() {
     });
 }
 function scopeLabel() {
-  if (state.setor !== 'Todos') return state.setor;
-  if (state.departamento !== 'Todos') return state.departamento;
-  if (state.filial !== 'Todas') return 'Filial ' + state.filial;
   if (state.isManager) {
     if (state.managerFilial && state.managerFilial !== '*') return 'Filial ' + state.managerFilial;
     if (state.managerDepartamento && state.managerDepartamento !== '*') return state.managerDepartamento;
@@ -709,19 +701,10 @@ function render() {
   const counts = countBy(scope);
   const filtered = getFiltered();
 
-  // listas em cascata: a filial define os departamentos, o departamento define os setores
-  const podeTrocarFilial = !state.isManager || state.managerFilial === '*' || !state.managerFilial;
-  const filiais = ['Todas', ...Array.from(new Set(state.employees.map(filialOf))).sort((a, b) => a.localeCompare(b, 'pt-BR'))];
-  const naFilial = state.employees.filter(f => state.filial === 'Todas' || filialOf(f) === state.filial);
-  const departamentos = ['Todos', ...Array.from(new Set(naFilial.map(f => f.departamento).filter(Boolean))).sort((a, b) => a.localeCompare(b, 'pt-BR'))];
-  const noDepto = naFilial.filter(f => state.departamento === 'Todos' || f.departamento === state.departamento);
-  const setores = ['Todos', ...Array.from(new Set(noDepto.map(f => f.setor).filter(Boolean))).sort((a, b) => a.localeCompare(b, 'pt-BR'))];
-  if (!departamentos.includes(state.departamento)) state.departamento = 'Todos';
-  if (!setores.includes(state.setor)) state.setor = 'Todos';
   const anosVenc = ['Todos', ...Array.from(new Set(
     state.employees.filter(f => f.ultimaData).map(f => addMonths(f.ultimaData, f.periodicidade || 12).getFullYear())
   )).sort((a, b) => a - b)];
-  const temFiltro = state.filial !== 'Todas' || state.departamento !== 'Todos' || state.setor !== 'Todos' || state.status !== 'Todos' || state.busca
+  const temFiltro = state.status !== 'Todos' || state.busca
     || state.anoVenc !== 'Todos' || state.mesVenc !== 'Todos';
   const pctEmDia = ativos ? Math.round(((counts.em_dia || 0) / ativos) * 100) : 0;
 
@@ -772,22 +755,7 @@ function render() {
     ${state.tendenciaAberta ? tendenciaPanel(scope) : ''}
 
     <div class="toolbar">
-      <div class="search-wrap">${ICONS.search}<input id="input-busca" placeholder="Buscar por nome, matrícula ou cargo" aria-label="Buscar colaborador" value="${escapeAttr(state.busca)}"></div>
-      <div class="select-wrap">
-        <select id="select-filial" ${podeTrocarFilial ? '' : 'disabled title="Seu acesso é restrito a esta filial"'}>
-          ${filiais.map(f => `<option value="${escapeAttr(f)}" ${f === state.filial ? 'selected' : ''}>${f === 'Todas' ? 'Todas as filiais' : escapeHtml(f)}</option>`).join('')}
-        </select>${ICONS.chevron}
-      </div>
-      <div class="select-wrap">
-        <select id="select-depto">
-          ${departamentos.map(d => `<option value="${escapeAttr(d)}" ${d === state.departamento ? 'selected' : ''}>${d === 'Todos' ? 'Todos os departamentos' : d}</option>`).join('')}
-        </select>${ICONS.chevron}
-      </div>
-      <div class="select-wrap">
-        <select id="select-setor">
-          ${setores.map(s => `<option value="${escapeAttr(s)}" ${s === state.setor ? 'selected' : ''}>${s === 'Todos' ? 'Todos os setores' : escapeHtml(s)}</option>`).join('')}
-        </select>${ICONS.chevron}
-      </div>
+      <div class="search-wrap">${ICONS.search}<input id="input-busca" placeholder="Buscar pelo nome do colaborador" aria-label="Buscar colaborador" value="${escapeAttr(state.busca)}"></div>
       <div class="select-wrap">
         <select id="select-status">
           <option value="Todos" ${state.status === 'Todos' ? 'selected' : ''}>Todos os status</option>
@@ -806,11 +774,9 @@ function render() {
           ${MESES.map((m, i) => `<option value="${i + 1}" ${String(i + 1) === String(state.mesVenc) ? 'selected' : ''}>${m}</option>`).join('')}
         </select>${ICONS.chevron}
       </div>
-      <button class="clear-link" id="btn-por-filial">${state.verPorFilial ? 'Ocultar visão por filial' : 'Ver por filial'}</button>
       ${temFiltro ? `<button class="clear-link" id="btn-clear">Limpar filtros</button>` : ''}
     </div>
 
-    ${state.verPorFilial ? painelPorFilialHtml(getScope()) : ''}
 
     <div class="result-count">${filtered.length.toLocaleString('pt-BR')} registro(s) encontrado(s)</div>
     ${bulkBarHtml(filtered.length)}
@@ -1064,36 +1030,15 @@ function attachEvents() {
       input.setSelectionRange(cursorPos, cursorPos);
     }, 300);
   };
-  const selFilial = document.getElementById('select-filial');
-  if (selFilial) selFilial.onchange = (e) => {
-    state.filial = e.target.value;
-    state.departamento = 'Todos'; state.setor = 'Todos'; // recomeça a cascata
-    state.page = 1; render();
-  };
-  document.getElementById('select-depto').onchange = (e) => { state.departamento = e.target.value; state.setor = 'Todos'; state.page = 1; render(); };
-  document.getElementById('select-setor').onchange = (e) => { state.setor = e.target.value; state.page = 1; render(); };
   document.getElementById('select-status').onchange = (e) => { state.status = e.target.value; state.page = 1; render(); };
   document.getElementById('select-ano-venc').onchange = (e) => { state.anoVenc = e.target.value; state.page = 1; render(); };
   document.getElementById('select-mes-venc').onchange = (e) => { state.mesVenc = e.target.value; state.page = 1; render(); };
-  const btnPorFilial = document.getElementById('btn-por-filial');
-  if (btnPorFilial) btnPorFilial.onclick = () => { state.verPorFilial = !state.verPorFilial; render(); };
   const clearBtn = document.getElementById('btn-clear');
   if (clearBtn) clearBtn.onclick = () => {
-    state.busca = ''; state.status = 'Todos'; state.departamento = 'Todos'; state.setor = 'Todos';
+    state.busca = ''; state.status = 'Todos';
     state.anoVenc = 'Todos'; state.mesVenc = 'Todos';
-    if (!state.isManager || state.managerFilial === '*' || !state.managerFilial) state.filial = 'Todas';
     state.page = 1; render();
   };
-
-  document.querySelectorAll('.filial-row, .filial-tag').forEach(el => {
-    el.onclick = (ev) => {
-      if (!(!state.isManager || state.managerFilial === '*' || !state.managerFilial)) return;
-      ev.stopPropagation();
-      state.filial = el.dataset.filial;
-      state.departamento = 'Todos'; state.setor = 'Todos'; state.page = 1;
-      render();
-    };
-  });
 
   document.querySelectorAll('.count-card').forEach(el => {
     el.onclick = () => {
